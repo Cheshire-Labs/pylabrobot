@@ -331,7 +331,6 @@ class PreciseFlexBackend(SCARABackend, ABC):
       position: Either CartesianCoords or a dict mapping PFAxis to float values.
         When using a dict, any unspecified axes will be filled in from the current position.
     """
-    print(position, isinstance(position, dict))
     if isinstance(position, dict):
       current = await self.get_joint_position()
       joint_coords = {**current, **position}
