@@ -3,8 +3,9 @@ from .chatterbox import LiquidHandlerChatterboxBackend
 from .chatterbox_backend import ChatterBoxBackend
 from .hamilton.STAR_backend import STAR, STARBackend
 from .hamilton.vantage_backend import Vantage, VantageBackend
-from .opentrons_backend import OpentronsOT2Backend
+from .opentrons_backend import OpentronsBackend, OpentronsOT2Backend
 from .opentrons_chatterbox import OpentronsOT2ChatterboxBackend
+from .opentrons_flex_backend import OpentronsFlexBackend
 from .opentrons_simulator import OpentronsOT2Simulator
 from .serializing_backend import SerializingBackend
 from .tecan.EVO_backend import EVO, EVOBackend

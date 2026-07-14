@@ -1,5 +1,7 @@
 import inspect
+import json
 import logging
+import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
@@ -26,6 +28,7 @@ from pylabrobot.liquid_handling.standard import (
 )
 from pylabrobot.resources import (
   Coordinate,
+  Resource,
   Tip,
 )
 from pylabrobot.resources.opentrons import OTDeck
@@ -51,8 +54,8 @@ class _IOLogger:
   """Transparent proxy over the ``ot_api`` module that logs every call at
   ``LOG_LEVEL_IO``.
 
-  The OT-2 talks HTTP through ``ot_api`` rather than a pylabrobot.io transport, so
-  this wrapper gives it the same wire-level logging every other backend gets from
+  Opentrons robots talk HTTP through ``ot_api`` rather than a pylabrobot.io transport, so
+  this wrapper gives them the same wire-level logging every other backend gets from
   its io object. Submodules (``lh``, ``health``, ...) are wrapped recursively;
   plain attributes (e.g. ``run_id``) pass through untouched.
   """
@@ -77,25 +80,18 @@ class _IOLogger:
     return attr
 
 
-class OpentronsOT2Backend(LiquidHandlerBackend):
-  """Backends for the Opentrons OT2 liquid handling robots."""
+class OpentronsBackend(LiquidHandlerBackend):
+  """Shared base for the Opentrons HTTP backends (OT-2 and Flex).
 
-  pipette_name2volume = {
-    "p10_single": 10,
-    "p10_multi": 10,
-    "p20_single_gen2": 20,
-    "p20_multi_gen2": 20,
-    "p50_single": 50,
-    "p50_multi": 50,
-    "p300_single": 300,
-    "p300_multi": 300,
-    "p300_single_gen2": 300,
-    "p300_multi_gen2": 300,
-    "p1000_single": 1000,
-    "p1000_single_gen2": 1000,
-    "p300_single_gen3": 300,
-    "p1000_single_gen3": 1000,
-  }
+  Both robots run the same ``robot-server`` and are driven over the same HTTP API via ``ot_api``,
+  so all of the transport, run lifecycle, JIT labware definition, pipette selection, and
+  move-then-aspirate/dispense-in-place logic lives here. The parts that genuinely differ per robot
+  (pipette catalog, deck-frame conversion, slot addressing, trash target, deck configuration, and
+  the gripper) are override hooks implemented by the concrete subclasses.
+  """
+
+  # Subclasses fill this with the pipettes their robot reports and the tip volume each accepts.
+  pipette_name2volume: Dict[str, int] = {}
 
   def __init__(self, host: str, port: int = 31950):
     super().__init__()
@@ -109,9 +105,8 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     self.host = host
     self.port = port
 
-    # All hardware I/O goes through this handle so a subclass (e.g. the chatterbox)
-    # can dry-run the backend by swapping it for a recording stand-in. The real handle
-    # wraps ot_api to log every HTTP call at LOG_LEVEL_IO, like other backends' io.
+    # A subclass (e.g. the chatterbox) can dry-run the backend by swapping this handle for a
+    # recording stand-in; the real handle wraps ot_api to log every HTTP call at LOG_LEVEL_IO.
     self._ot: Any = _IOLogger(ot_api)
 
     self._ot.set_host(host)
@@ -122,7 +117,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     self.right_pipette: Optional[Dict[str, str]] = None
 
     self.traversal_height = 120  # test
-    self._tip_racks: Dict[str, int] = {}  # tip_rack.name -> slot index
+    self._tip_racks: Dict[str, Union[int, str]] = {}  # tip_rack.name -> slot
     self._plr_name_to_load_name: Dict[str, str] = {}
 
   def serialize(self) -> dict:
@@ -136,6 +131,9 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     # create run
     run_id = self._ot.runs.create()
     self._ot.set_run(run_id)
+
+    # tell the robot which fixtures are on the deck (Flex requires this; OT-2 is a no-op)
+    await self._configure_deck()
 
     # get pipettes, then assign them
     self.left_pipette, self.right_pipette = self._ot.lh.add_mounted_pipettes()
@@ -174,6 +172,29 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
           except Exception:
             pass
 
+  def _request(
+    self, method: str, path: str, body: Optional[dict] = None, timeout: float = 60.0
+  ) -> dict:
+    """Make a raw HTTP request to the robot-server (for endpoints ot_api does not wrap)."""
+    url = f"http://{self.host}:{self.port}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Opentrons-Version": "3"}
+    if data is not None:
+      headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+      return cast(dict, json.loads(response.read().decode()))
+
+  def _run_command(self, command_type: str, params: dict, timeout: float = 60.0) -> dict:
+    """Enqueue a run command and block until it reaches a terminal status, raising on failure."""
+    run_id = getattr(self._ot, "run_id", None)
+    body = {"data": {"commandType": command_type, "params": params, "intent": "setup"}}
+    path = f"/runs/{run_id}/commands?waitUntilComplete=true&timeout={int(timeout * 1000)}"
+    result = self._request("POST", path, body, timeout=timeout + 5.0)["data"]
+    if result.get("status") == "failed" or result.get("error"):
+      raise RuntimeError(f"Opentrons {command_type} command failed: {result.get('error')}")
+    return result
+
   def get_ot_name(self, plr_resource_name: str) -> str:
     """Opentrons only allows names in ^[a-z0-9._]+$, but in PLR we are flexible.
     So we map PLR names to OT names here.
@@ -206,9 +227,9 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
 
     return None
 
-  async def _assign_tip_rack(self, tip_rack: TipRack, tip: Tip):
+  def _build_tip_rack_definition(self, tip_rack: TipRack, tip: Tip) -> dict:
     ot_slot_size_y = 86
-    lw = {
+    return {
       "schemaVersion": 2,
       "version": 1,
       "namespace": "pylabrobot",
@@ -268,24 +289,20 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
       ],
     }
 
+  async def _assign_tip_rack(self, tip_rack: TipRack, tip: Tip):
+    lw = self._build_tip_rack_definition(tip_rack, tip)
+
     data = self._ot.labware.define(lw)
     namespace, definition, version = data["data"]["definitionUri"].split("/")
 
-    # assign labware to robot
     labware_uuid = self.get_ot_name(tip_rack.name)
+    slot = self._get_slot_for_resource(tip_rack)
 
-    deck = tip_rack.parent
-    while deck is not None and not isinstance(deck, OTDeck):
-      deck = deck.parent  # labware sits in a slot holder, whose parent is the deck
-    assert isinstance(deck, OTDeck)
-    slot = deck.get_slot(tip_rack)
-    assert slot is not None, "tip rack must be on deck"
-
-    self._ot.labware.add(
+    self._load_labware_at_slot(
       load_name=definition,
       namespace=namespace,
-      ot_location=slot,
       version=version,
+      slot=slot,
       labware_id=labware_uuid,
       display_name=self.get_ot_name(tip_rack.name),
     )
@@ -325,10 +342,9 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
   def _set_tip_state(self, pipette_id: str, has_tip: bool):
     """Update tip-mounted state for the pipette that was used.
 
-    This method now validates the provided ``pipette_id`` against both the left
-    and right pipette configurations. It updates the state only if the ID
-    matches a known, configured pipette; otherwise it raises an error to avoid
-    silently putting the backend into an inconsistent state.
+    Validates ``pipette_id`` against both the left and right pipette configurations and updates
+    state only if it matches a known, configured pipette; otherwise raises to avoid silently
+    putting the backend into an inconsistent state.
     """
     if self.left_pipette is not None and pipette_id == self.left_pipette["pipetteId"]:
       self.left_pipette_has_tip = has_tip
@@ -372,44 +388,23 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     self._set_tip_state(pipette_id, True)
 
   async def drop_tips(self, ops: List[Drop], use_channels: List[int]):
-    """Drop tips from the specified resource."""
+    """Drop tips into a tip rack well or the robot's trash."""
 
     pipette_id = self._get_drop_pipette(ops)
     op = ops[0]
 
-    use_fixed_trash = (
-      cast(str, self.ot_api_version) >= _OT_DECK_IS_ADDRESSABLE_AREA_VERSION
-      and op.resource.name == "trash"
-    )
-    if use_fixed_trash:
-      labware_id = "fixedTrash"
+    offset_x, offset_y = op.offset.x, op.offset.y
+    offset_z = op.offset.z + 10  # ad-hoc offset adjustment that makes it smoother
+
+    if self._resource_is_trash(op.resource):
+      self._drop_tip_in_trash(pipette_id, offset_x, offset_y, offset_z)
     else:
       tip_rack = op.resource.parent
       assert isinstance(tip_rack, TipRack), "TipSpot's parent must be a TipRack."
       if tip_rack.name not in self._tip_racks:
         await self._assign_tip_rack(tip_rack, op.tip)
-      labware_id = self.get_ot_name(tip_rack.name)
-
-    offset_x, offset_y, offset_z = (
-      op.offset.x,
-      op.offset.y,
-      op.offset.z,
-    )
-
-    # ad-hoc offset adjustment that makes it smoother.
-    offset_z += 10
-
-    if use_fixed_trash:
-      self._ot.lh.move_to_addressable_area_for_drop_tip(
-        pipette_id=pipette_id,
-        offset_x=offset_x,
-        offset_y=offset_y,
-        offset_z=offset_z,
-      )
-      self._ot.lh.drop_tip_in_place(pipette_id=pipette_id)
-    else:
       self._ot.lh.drop_tip(
-        labware_id,
+        self.get_ot_name(tip_rack.name),
         well_name=self.get_ot_name(op.resource.name),
         pipette_id=pipette_id,
         offset_x=offset_x,
@@ -435,12 +430,12 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     """
 
     if self.left_pipette is not None:
-      left_volume = OpentronsOT2Backend.pipette_name2volume[self.left_pipette["name"]]
+      left_volume = self.pipette_name2volume[self.left_pipette["name"]]
       if left_volume >= volume and self.left_pipette_has_tip:
         return cast(str, self.left_pipette["pipetteId"])
 
     if self.right_pipette is not None:
-      right_volume = OpentronsOT2Backend.pipette_name2volume[self.right_pipette["name"]]
+      right_volume = self.pipette_name2volume[self.right_pipette["name"]]
       if right_volume >= volume and self.right_pipette_has_tip:
         return cast(str, self.right_pipette["pipetteId"])
 
@@ -454,36 +449,6 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     if self.right_pipette is not None and pipette_id == self.right_pipette["pipetteId"]:
       return cast(str, self.right_pipette["name"])
     raise ValueError(f"Unknown pipette id: {pipette_id}")
-
-  def _get_default_aspiration_flow_rate(self, pipette_name: str) -> float:
-    """Get the default aspiration flow rate for the specified pipette in uL/s.
-
-    Data from https://archive.ph/ZUN9f
-    """
-
-    return {
-      "p300_multi_gen2": 94,
-      "p10_single": 5,
-      "p10_multi": 5,
-      "p50_single": 25,
-      "p50_multi": 25,
-      "p300_single": 150,
-      "p300_multi": 150,
-      "p1000_single": 500,
-      "p20_single_gen2": 3.78,
-      "p300_single_gen2": 46.43,
-      "p1000_single_gen2": 137.35,
-      "p20_multi_gen2": 7.6,
-    }[pipette_name]
-
-  def _deck_to_robot_frame(self, location: Coordinate) -> Coordinate:
-    """Convert a deck-frame coordinate to the OT-2 robot frame.
-
-    pylabrobot positions OT deck slots from the deck plate corner, whereas the OT-2 motion API
-    expects coordinates in the robot frame whose origin is slot 1's corner. The two frames differ by
-    slot 1's position in the deck frame, so subtract it.
-    """
-    return location - cast(OTDeck, self.deck).slot_locations[0]
 
   async def aspirate(self, ops: List[SingleChannelAspiration], use_channels: List[int]):
     """Aspirate liquid from the specified resource using pip."""
@@ -535,30 +500,6 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
       minimum_z_height=self.traversal_height,
       pipette_id=pipette_id,
     )
-
-  def _get_default_dispense_flow_rate(self, pipette_name: str) -> float:
-    """Get the default dispense flow rate for the specified pipette.
-
-    Data from https://archive.ph/ZUN9f
-
-    Returns:
-      The default flow rate in ul/s.
-    """
-
-    return {
-      "p300_multi_gen2": 94,
-      "p10_single": 10,
-      "p10_multi": 10,
-      "p50_single": 50,
-      "p50_multi": 50,
-      "p300_single": 300,
-      "p300_multi": 300,
-      "p1000_single": 1000,
-      "p20_single_gen2": 7.56,
-      "p300_single_gen2": 92.86,
-      "p1000_single_gen2": 274.7,
-      "p20_multi_gen2": 7.6,
-    }[pipette_name]
 
   async def dispense(self, ops: List[SingleChannelDispense], use_channels: List[int]):
     """Dispense liquid from the specified resource using pip."""
@@ -628,13 +569,13 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     raise NotImplementedError("The Opentrons backend does not support the 96 head.")
 
   async def pick_up_resource(self, pickup: ResourcePickup):
-    raise NotImplementedError("The Opentrons backend does not support the robotic arm.")
+    raise NotImplementedError("This Opentrons backend does not support moving labware.")
 
   async def move_picked_up_resource(self, move: ResourceMove):
-    raise NotImplementedError("The Opentrons backend does not support the robotic arm.")
+    raise NotImplementedError("This Opentrons backend does not support moving labware.")
 
   async def drop_resource(self, drop: ResourceDrop):
-    raise NotImplementedError("The Opentrons backend does not support the robotic arm.")
+    raise NotImplementedError("This Opentrons backend does not support moving labware.")
 
   async def list_connected_modules(self) -> List[dict]:
     """List all connected temperature modules."""
@@ -647,7 +588,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     if self.right_pipette is not None:
       pipettes.append(self.right_pipette["pipetteId"])
     if channel < 0 or channel >= len(pipettes):
-      raise NoChannelError(f"Channel {channel} not available on this OT-2 setup.")
+      raise NoChannelError(f"Channel {channel} not available on this Opentrons setup.")
     return pipettes[channel]
 
   def _current_channel_position(self, channel: int) -> Tuple[str, Coordinate]:
@@ -658,13 +599,13 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
       res = self._ot.lh.save_position(pipette_id=pipette_id)
       pos = res["data"]["result"]["position"]
       current = Coordinate(pos["x"], pos["y"], pos["z"])
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
       raise RuntimeError("Failed to query current pipette position") from exc
 
     return pipette_id, current
 
   async def prepare_for_manual_channel_operation(self, channel: int):
-    """Validate channel exists (no-op otherwise for OT-2)."""
+    """Validate channel exists (no-op otherwise)."""
 
     _ = self._pipette_id_for_channel(channel)
 
@@ -735,23 +676,185 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     )
 
   def can_pick_up_tip(self, channel_idx: int, tip: Tip) -> bool:
-    def supports_tip(channel_vol: float, tip_vol: float) -> bool:
-      if channel_vol == 20:
-        return tip_vol in {10, 20}
-      if channel_vol == 300:
-        return tip_vol in {200, 300}
-      if channel_vol == 1000:
-        return tip_vol in {1000}
-      raise ValueError(f"Unknown channel volume: {channel_vol}")
-
     if channel_idx == 0:
-      if self.left_pipette is None:
-        return False
-      left_volume = OpentronsOT2Backend.pipette_name2volume[self.left_pipette["name"]]
-      return supports_tip(left_volume, tip.maximal_volume)
-    if channel_idx == 1:
-      if self.right_pipette is None:
-        return False
-      right_volume = OpentronsOT2Backend.pipette_name2volume[self.right_pipette["name"]]
-      return supports_tip(right_volume, tip.maximal_volume)
-    return False
+      pipette = self.left_pipette
+    elif channel_idx == 1:
+      pipette = self.right_pipette
+    else:
+      return False
+    if pipette is None:
+      return False
+    channel_volume = self.pipette_name2volume[pipette["name"]]
+    return self._tip_volume_supported(channel_volume, tip.maximal_volume)
+
+  # --- override hooks: implemented per concrete robot ---
+
+  async def _configure_deck(self):
+    """Declare the deck's fixtures to the robot before running. OT-2 needs nothing; Flex must."""
+
+  def _deck_to_robot_frame(self, location: Coordinate) -> Coordinate:
+    """Convert a deck-frame coordinate to the robot's motion frame."""
+    raise NotImplementedError
+
+  def _get_default_aspiration_flow_rate(self, pipette_name: str) -> float:
+    """Default aspiration flow rate in uL/s for the given pipette."""
+    raise NotImplementedError
+
+  def _get_default_dispense_flow_rate(self, pipette_name: str) -> float:
+    """Default dispense flow rate in uL/s for the given pipette."""
+    raise NotImplementedError
+
+  def _tip_volume_supported(self, channel_volume: float, tip_volume: float) -> bool:
+    """Whether a pipette of ``channel_volume`` can pick up a tip of ``tip_volume``."""
+    raise NotImplementedError
+
+  def _get_slot_for_resource(self, resource: Resource) -> Union[int, str]:
+    """The robot's slot identifier for a resource that is placed on the deck."""
+    raise NotImplementedError
+
+  def _load_labware_at_slot(
+    self,
+    load_name: str,
+    namespace: str,
+    version: str,
+    slot: Union[int, str],
+    labware_id: str,
+    display_name: str,
+  ):
+    """Load a defined labware onto ``slot`` on the robot."""
+    raise NotImplementedError
+
+  def _resource_is_trash(self, resource: Resource) -> bool:
+    """Whether a tip-drop target resource should route to the robot's trash."""
+    raise NotImplementedError
+
+  def _drop_tip_in_trash(
+    self, pipette_id: str, offset_x: float, offset_y: float, offset_z: float
+  ):
+    """Drop the mounted tip into the robot's trash addressable area."""
+    raise NotImplementedError
+
+
+class OpentronsOT2Backend(OpentronsBackend):
+  """Backend for the Opentrons OT-2 liquid handling robot."""
+
+  pipette_name2volume = {
+    "p10_single": 10,
+    "p10_multi": 10,
+    "p20_single_gen2": 20,
+    "p20_multi_gen2": 20,
+    "p50_single": 50,
+    "p50_multi": 50,
+    "p300_single": 300,
+    "p300_multi": 300,
+    "p300_single_gen2": 300,
+    "p300_multi_gen2": 300,
+    "p1000_single": 1000,
+    "p1000_single_gen2": 1000,
+    "p300_single_gen3": 300,
+    "p1000_single_gen3": 1000,
+  }
+
+  def _deck_to_robot_frame(self, location: Coordinate) -> Coordinate:
+    """Convert a deck-frame coordinate to the OT-2 robot frame.
+
+    pylabrobot positions OT deck slots from the deck plate corner, whereas the OT-2 motion API
+    expects coordinates in the robot frame whose origin is slot 1's corner. The two frames differ by
+    slot 1's position in the deck frame, so subtract it.
+    """
+    return location - cast(OTDeck, self.deck).slot_locations[0]
+
+  def _get_default_aspiration_flow_rate(self, pipette_name: str) -> float:
+    """Get the default aspiration flow rate for the specified pipette in uL/s.
+
+    Data from https://archive.ph/ZUN9f
+    """
+
+    return {
+      "p300_multi_gen2": 94,
+      "p10_single": 5,
+      "p10_multi": 5,
+      "p50_single": 25,
+      "p50_multi": 25,
+      "p300_single": 150,
+      "p300_multi": 150,
+      "p1000_single": 500,
+      "p20_single_gen2": 3.78,
+      "p300_single_gen2": 46.43,
+      "p1000_single_gen2": 137.35,
+      "p20_multi_gen2": 7.6,
+    }[pipette_name]
+
+  def _get_default_dispense_flow_rate(self, pipette_name: str) -> float:
+    """Get the default dispense flow rate for the specified pipette in uL/s.
+
+    Data from https://archive.ph/ZUN9f
+    """
+
+    return {
+      "p300_multi_gen2": 94,
+      "p10_single": 10,
+      "p10_multi": 10,
+      "p50_single": 50,
+      "p50_multi": 50,
+      "p300_single": 300,
+      "p300_multi": 300,
+      "p1000_single": 1000,
+      "p20_single_gen2": 7.56,
+      "p300_single_gen2": 92.86,
+      "p1000_single_gen2": 274.7,
+      "p20_multi_gen2": 7.6,
+    }[pipette_name]
+
+  def _tip_volume_supported(self, channel_volume: float, tip_volume: float) -> bool:
+    if channel_volume == 20:
+      return tip_volume in {10, 20}
+    if channel_volume == 300:
+      return tip_volume in {200, 300}
+    if channel_volume == 1000:
+      return tip_volume in {1000}
+    raise ValueError(f"Unknown channel volume: {channel_volume}")
+
+  def _get_slot_for_resource(self, resource: Resource) -> int:
+    deck = resource.parent
+    while deck is not None and not isinstance(deck, OTDeck):
+      deck = deck.parent  # labware sits in a slot holder, whose parent is the deck
+    assert isinstance(deck, OTDeck)
+    slot = deck.get_slot(resource)
+    assert slot is not None, "resource must be on deck"
+    return slot
+
+  def _load_labware_at_slot(
+    self,
+    load_name: str,
+    namespace: str,
+    version: str,
+    slot: Union[int, str],
+    labware_id: str,
+    display_name: str,
+  ):
+    self._ot.labware.add(
+      load_name=load_name,
+      namespace=namespace,
+      ot_location=slot,
+      version=version,
+      labware_id=labware_id,
+      display_name=display_name,
+    )
+
+  def _resource_is_trash(self, resource: Resource) -> bool:
+    return (
+      cast(str, self.ot_api_version) >= _OT_DECK_IS_ADDRESSABLE_AREA_VERSION
+      and resource.name == "trash"
+    )
+
+  def _drop_tip_in_trash(
+    self, pipette_id: str, offset_x: float, offset_y: float, offset_z: float
+  ):
+    self._ot.lh.move_to_addressable_area_for_drop_tip(
+      pipette_id=pipette_id,
+      offset_x=offset_x,
+      offset_y=offset_y,
+      offset_z=offset_z,
+    )
+    self._ot.lh.drop_tip_in_place(pipette_id=pipette_id)
