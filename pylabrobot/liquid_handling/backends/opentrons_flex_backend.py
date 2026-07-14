@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple, Union, cast
+from typing import Dict, List, Optional, Tuple, Union, cast
 
 from pylabrobot.liquid_handling.backends.opentrons_backend import OpentronsBackend
 from pylabrobot.liquid_handling.standard import (
@@ -8,25 +8,9 @@ from pylabrobot.liquid_handling.standard import (
 )
 from pylabrobot.resources import Coordinate, Resource
 from pylabrobot.resources.opentrons import FlexDeck
+from pylabrobot.resources.trash import Trash
 
-# The Flex default deck configuration: single slots on columns 1-3, with the movable trash bin at
-# A3. Sent to the robot at setup so tip disposal and labware placement have valid fixtures.
-_DEFAULT_FLEX_DECK_CONFIG = [
-  {"cutoutId": "cutoutA1", "cutoutFixtureId": "singleLeftSlot"},
-  {"cutoutId": "cutoutB1", "cutoutFixtureId": "singleLeftSlot"},
-  {"cutoutId": "cutoutC1", "cutoutFixtureId": "singleLeftSlot"},
-  {"cutoutId": "cutoutD1", "cutoutFixtureId": "singleLeftSlot"},
-  {"cutoutId": "cutoutA2", "cutoutFixtureId": "singleCenterSlot"},
-  {"cutoutId": "cutoutB2", "cutoutFixtureId": "singleCenterSlot"},
-  {"cutoutId": "cutoutC2", "cutoutFixtureId": "singleCenterSlot"},
-  {"cutoutId": "cutoutD2", "cutoutFixtureId": "singleCenterSlot"},
-  {"cutoutId": "cutoutA3", "cutoutFixtureId": "trashBinAdapter"},
-  {"cutoutId": "cutoutB3", "cutoutFixtureId": "singleRightSlot"},
-  {"cutoutId": "cutoutC3", "cutoutFixtureId": "singleRightSlot"},
-  {"cutoutId": "cutoutD3", "cutoutFixtureId": "singleRightSlot"},
-]
-
-# Addressable area exposed by the trashBinAdapter at A3 (see _DEFAULT_FLEX_DECK_CONFIG).
+# Addressable area exposed by the trashBinAdapter fixture at A3, used for tip disposal.
 _TRASH_ADDRESSABLE_AREA = "movableTrashA3"
 
 
@@ -46,14 +30,12 @@ class OpentronsFlexBackend(OpentronsBackend):
     "p50_multi_flex": 50,
     "p1000_single_flex": 1000,
     "p1000_multi_flex": 1000,
-    "p200_96_flex": 200,
     "p1000_96_flex": 1000,
     # loadPipette names
     "flex_1channel_50": 50,
     "flex_8channel_50": 50,
     "flex_1channel_1000": 1000,
     "flex_8channel_1000": 1000,
-    "flex_96channel_200": 200,
     "flex_96channel_1000": 1000,
   }
 
@@ -62,6 +44,11 @@ class OpentronsFlexBackend(OpentronsBackend):
     self._loaded_labware: Dict[str, str] = {}  # resource.name -> opentrons labware id
     self._pending_pickup: Optional[Tuple[str, Resource]] = None
 
+  async def setup(self, skip_home: bool = False):
+    await super().setup(skip_home=skip_home)
+    self._loaded_labware = {}
+    self._pending_pickup = None
+
   async def stop(self):
     await super().stop()
     self._loaded_labware = {}
@@ -69,24 +56,43 @@ class OpentronsFlexBackend(OpentronsBackend):
 
   async def _configure_deck(self):
     self._request(
-      "PUT", "/deck_configuration", {"data": {"cutoutFixtures": _DEFAULT_FLEX_DECK_CONFIG}}
+      "PUT", "/deck_configuration", {"data": {"cutoutFixtures": self._deck_configuration()}}
     )
+
+  def _deck_configuration(self) -> List[Dict[str, str]]:
+    """The Flex cutout fixtures implied by the paired FlexDeck's slots.
+
+    Columns 1 and 2 are single slots; a column-3 cutout is the movable trash bin where the deck's
+    trash sits and a single slot otherwise. Derived from the deck so the robot's fixtures cannot
+    disagree with the deck model: FlexDeck(with_trash=False) frees A3 as an ordinary slot here too.
+    """
+    deck = self.deck
+    assert isinstance(deck, FlexDeck), "OpentronsFlexBackend requires a FlexDeck."
+    column_fixture = {1: "singleLeftSlot", 2: "singleCenterSlot", 3: "singleRightSlot"}
+    config: List[Dict[str, str]] = []
+    for slot, resource in deck.slots.items():
+      column = int(slot[1])
+      fixture = (
+        "trashBinAdapter"
+        if column == 3 and isinstance(resource, Trash)
+        else column_fixture[column]
+      )
+      config.append({"cutoutId": f"cutout{slot}", "cutoutFixtureId": fixture})
+    return config
 
   def _deck_to_robot_frame(self, location: Coordinate) -> Coordinate:
     # FlexDeck is defined directly in the robot frame (origin at slot D1), so no rebasing is needed.
     return location
 
   def _get_default_aspiration_flow_rate(self, pipette_name: str) -> float:
-    return {50: 35.0, 200: 80.0, 1000: 160.0}[self.pipette_name2volume[pipette_name]]
+    return {50: 35.0, 1000: 160.0}[self.pipette_name2volume[pipette_name]]
 
   def _get_default_dispense_flow_rate(self, pipette_name: str) -> float:
-    return {50: 35.0, 200: 80.0, 1000: 160.0}[self.pipette_name2volume[pipette_name]]
+    return {50: 35.0, 1000: 160.0}[self.pipette_name2volume[pipette_name]]
 
   def _tip_volume_supported(self, channel_volume: float, tip_volume: float) -> bool:
     if channel_volume == 50:
       return tip_volume == 50
-    if channel_volume == 200:
-      return tip_volume in {50, 200}
     if channel_volume == 1000:
       return tip_volume in {50, 200, 1000}
     raise ValueError(f"Unknown channel volume: {channel_volume}")
@@ -217,6 +223,11 @@ class OpentronsFlexBackend(OpentronsBackend):
   async def drop_resource(self, drop: ResourceDrop):
     if self._pending_pickup is None:
       raise RuntimeError("drop_resource called without a preceding pick_up_resource.")
+    if drop.rotation != 0:
+      raise ValueError(
+        "The Flex gripper cannot rotate labware; pickup_direction and drop_direction must match "
+        f"(the requested move rotates the labware {drop.rotation} degrees)."
+      )
     labware_id, _ = self._pending_pickup
     slot = cast(FlexDeck, self.deck).get_slot_at_location(drop.destination)
     if slot is None:

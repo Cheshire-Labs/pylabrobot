@@ -1,5 +1,5 @@
 import textwrap
-from typing import Dict, List, Optional, cast
+from typing import Dict, Optional, cast
 
 from pylabrobot.resources.coordinate import Coordinate
 from pylabrobot.resources.deck import Deck
@@ -11,7 +11,7 @@ _SLOT_SIZE_X = 128.0
 _SLOT_SIZE_Y = 86.0
 
 # Front-left corner of every slot in the Flex robot frame (origin at slot D1), from shared-data
-# ot3_standard.json. Columns 1-3 are pipette-reachable; the staging column 4 is gripper-only.
+# ot3_standard.json. Rows A (back) to D (front), columns 1-3 left to right.
 _FLEX_SLOT_LOCATIONS: Dict[str, Coordinate] = {
   "D1": Coordinate(0.0, 0.0, 0.0),
   "C1": Coordinate(0.0, 107.0, 0.0),
@@ -25,13 +25,7 @@ _FLEX_SLOT_LOCATIONS: Dict[str, Coordinate] = {
   "C3": Coordinate(328.0, 107.0, 0.0),
   "B3": Coordinate(328.0, 214.0, 0.0),
   "A3": Coordinate(328.0, 321.0, 0.0),
-  "D4": Coordinate(492.0, 0.0, 14.5),
-  "C4": Coordinate(492.0, 107.0, 14.5),
-  "B4": Coordinate(492.0, 214.0, 14.5),
-  "A4": Coordinate(492.0, 321.0, 14.5),
 }
-
-STAGING_SLOTS = frozenset({"A4", "B4", "C4", "D4"})
 
 # The Flex default deck configuration mounts the movable trash bin at A3 (the trashBinAdapter
 # fixture, which exposes the movableTrashA3 addressable area used for tip disposal).
@@ -42,11 +36,13 @@ _TRASH_SIZE_Z = 40.0
 class FlexDeck(Deck):
   """The Opentrons Flex (OT-3) deck.
 
-  Working slots A1-D3 and the gripper-only staging column A4-D4 are modeled as ResourceHolder
-  children keyed by coordinate name; labware is placed with :meth:`assign_child_at_slot`. The deck
+  The twelve base slots A1-D3 are modeled as :class:`ResourceHolder` children keyed by slot name,
+  so the deck geometry has a single source of truth and renders directly from the serialized
+  resource tree. Labware is placed into a slot's holder with :meth:`assign_child_at_slot`. The deck
   frame is the Flex robot frame (origin at slot D1's front-left corner), so no deck-to-robot
-  rebasing is needed. With ``with_trash`` the trash bin occupies A3, matching the Flex default deck
-  configuration.
+  rebasing is needed. With ``with_trash`` the movable trash bin occupies A3, matching the Flex
+  default deck configuration. (Staging-area slots A4-D4 are optional add-on hardware and are not
+  modeled yet.)
   """
 
   def __init__(
@@ -97,11 +93,14 @@ class FlexDeck(Deck):
     location: Optional[Coordinate] = None,
     reassign: bool = True,
   ):
-    """Assign a slot holder to the deck.
+    """Assign a slot holder to the deck, or route labware into its slot.
 
-    The deck's direct children are the slot holders created in ``__init__``. Deserialization
+    The deck's direct children are the slot holders created in ``__init__``; deserialization
     re-assigns those holders by name, replacing the placeholder with the loaded one. Labware is
-    placed with :meth:`assign_child_at_slot`, not here.
+    normally placed with :meth:`assign_child_at_slot`. A gripper ``move_plate`` to a bare
+    :class:`~pylabrobot.resources.Coordinate` also lands here, because the liquid handler assigns
+    the moved plate to the deck at the destination coordinate; such a resource is routed into the
+    slot whose corner matches that coordinate, keeping the robot and the resource tree in sync.
     """
 
     existing = next((child for child in self.children if child.name == resource.name), None)
@@ -113,13 +112,20 @@ class FlexDeck(Deck):
         if holder is existing:
           self._slot_holders[slot] = cast(ResourceHolder, resource)
           break
-    elif not isinstance(resource, ResourceHolder):
-      raise ValueError(
-        f"Cannot assign '{resource.name}' directly to the deck. Use assign_child_at_slot to place "
-        "labware into a slot."
-      )
+      super().assign_child_resource(resource, location=location, reassign=reassign)
+      return
 
-    super().assign_child_resource(resource, location=location, reassign=reassign)
+    if isinstance(resource, ResourceHolder):
+      super().assign_child_resource(resource, location=location, reassign=reassign)
+      return
+
+    slot = self.get_slot_at_location(location) if location is not None else None
+    if slot is None:
+      raise ValueError(
+        f"Cannot assign '{resource.name}' to the deck at {location}: it matches no Flex slot. "
+        "Place labware with assign_child_at_slot, or move it to a slot holder or slot location."
+      )
+    self.assign_child_at_slot(resource, slot)
 
   def assign_child_at_slot(self, resource: Resource, slot: str):
     if slot not in self._slot_holders:
@@ -164,7 +170,7 @@ class FlexDeck(Deck):
     return None
 
   def summary(self) -> str:
-    """An ASCII map of the deck, A-row (back) at top, staging column on the right."""
+    """An ASCII map of the deck, A-row (back) at top."""
 
     def cell(slot: str) -> str:
       resource = self._slot_holders[slot].resource
@@ -174,7 +180,7 @@ class FlexDeck(Deck):
       return f"{slot}:{name}".ljust(13)
 
     rows = "".join(
-      "\n      | " + " | ".join(cell(f"{row}{col}") for col in (1, 2, 3, 4)) + " |"
+      "\n      | " + " | ".join(cell(f"{row}{col}") for col in (1, 2, 3)) + " |"
       for row in ("A", "B", "C", "D")
     )
     return textwrap.dedent(
