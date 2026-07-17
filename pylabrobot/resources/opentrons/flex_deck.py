@@ -108,9 +108,9 @@ class FlexDeck(Deck):
       if not reassign:
         raise ValueError(f"Resource '{resource.name}' already assigned to deck")
       super().unassign_child_resource(existing)
-      for slot, holder in self._slot_holders.items():
+      for occupied_slot, holder in self._slot_holders.items():
         if holder is existing:
-          self._slot_holders[slot] = cast(ResourceHolder, resource)
+          self._slot_holders[occupied_slot] = cast(ResourceHolder, resource)
           break
       super().assign_child_resource(resource, location=location, reassign=reassign)
       return

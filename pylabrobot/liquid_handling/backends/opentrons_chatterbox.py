@@ -162,7 +162,8 @@ class OpentronsOT2ChatterboxBackend(OpentronsOT2Backend):
     self.left_pipette: Optional[Dict[str, str]] = None
     self.right_pipette: Optional[Dict[str, str]] = None
     self.traversal_height = 120
-    self._tip_racks: Dict[str, int] = {}
+    # no annotation: the base declares Dict[str, Union[int, str]], since Flex slots are strings
+    self._tip_racks = {}
     self._plr_name_to_load_name: Dict[str, str] = {}
 
   @property

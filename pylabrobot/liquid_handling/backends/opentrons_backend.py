@@ -210,7 +210,7 @@ class OpentronsBackend(LiquidHandlerBackend):
     run_id = getattr(self._ot, "run_id", None)
     body = {"data": {"commandType": command_type, "params": params, "intent": "setup"}}
     path = f"/runs/{run_id}/commands?waitUntilComplete=true&timeout={int(timeout * 1000)}"
-    result = self._request("POST", path, body, timeout=timeout + 5.0)["data"]
+    result = cast(dict, self._request("POST", path, body, timeout=timeout + 5.0)["data"])
     if result.get("status") == "failed" or result.get("error"):
       raise RuntimeError(f"Opentrons {command_type} command failed: {result.get('error')}")
     return result
