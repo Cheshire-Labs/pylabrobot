@@ -84,6 +84,9 @@ class OpentronsFlexBackend(OpentronsBackend):
     # FlexDeck is defined directly in the robot frame (origin at slot D1), so no rebasing is needed.
     return location
 
+  def _robot_to_deck_frame(self, location: Coordinate) -> Coordinate:
+    return location
+
   def _get_default_aspiration_flow_rate(self, pipette_name: str) -> float:
     return {50: 35.0, 1000: 160.0}[self.pipette_name2volume[pipette_name]]
 

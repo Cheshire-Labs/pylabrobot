@@ -242,6 +242,85 @@ class OpentronsBackendCommandTests(unittest.IsolatedAsyncioTestCase):
     mock_drop_in_place.assert_called_once()
     mock_drop_tip.assert_not_called()
 
+  # -- free-space channel motion --
+
+  def _save_position_result(self, x, y, z):
+    """The shape savePosition returns: the pipette critical point, in the robot frame."""
+    return {"result": {"positionId": "pos-1", "position": {"x": x, "y": y, "z": z}}}
+
+  @patch("ot_api.lh.move_arm")
+  async def test_move_channel_x_substitutes_only_x(self, mock_move):
+    """move_channel_x reads the live pose, replaces x, and leaves y and z untouched."""
+    with patch.object(
+      self.backend, "_run_command", return_value=self._save_position_result(1.0, 2.0, 3.0)
+    ) as mock_command:
+      await self.backend.move_channel_x(0, 50.0)
+
+    mock_command.assert_called_once_with("savePosition", {"pipetteId": "left-pipette-id"})
+    corner = self.deck.slot_locations[0]
+    kwargs = mock_move.call_args.kwargs
+    self.assertEqual(kwargs["pipette_id"], "left-pipette-id")
+    self.assertAlmostEqual(kwargs["location_x"], 50.0 - corner.x)
+    self.assertAlmostEqual(kwargs["location_y"], 2.0)
+    self.assertAlmostEqual(kwargs["location_z"], 3.0)
+
+  @patch("ot_api.lh.move_arm")
+  async def test_move_channel_y_substitutes_only_y(self, mock_move):
+    """move_channel_y reads the live pose, replaces y, and leaves x and z untouched."""
+    with patch.object(
+      self.backend, "_run_command", return_value=self._save_position_result(1.0, 2.0, 3.0)
+    ):
+      await self.backend.move_channel_y(0, 60.0)
+
+    corner = self.deck.slot_locations[0]
+    kwargs = mock_move.call_args.kwargs
+    self.assertAlmostEqual(kwargs["location_x"], 1.0)
+    self.assertAlmostEqual(kwargs["location_y"], 60.0 - corner.y)
+    self.assertAlmostEqual(kwargs["location_z"], 3.0)
+
+  @patch("ot_api.lh.move_arm")
+  async def test_move_channel_z_substitutes_only_z(self, mock_move):
+    """move_channel_z reads the live pose, replaces z, and leaves x and y untouched."""
+    with patch.object(
+      self.backend, "_run_command", return_value=self._save_position_result(1.0, 2.0, 3.0)
+    ):
+      await self.backend.move_channel_z(0, 70.0)
+
+    corner = self.deck.slot_locations[0]
+    kwargs = mock_move.call_args.kwargs
+    self.assertAlmostEqual(kwargs["location_x"], 1.0)
+    self.assertAlmostEqual(kwargs["location_y"], 2.0)
+    self.assertAlmostEqual(kwargs["location_z"], 70.0 - corner.z)
+
+  @patch("ot_api.lh.move_arm")
+  async def test_move_channel_target_is_deck_frame(self, mock_move):
+    """The axis target is a deck-frame coordinate, so a move to slot 1's corner lands on the
+    robot origin. savePosition reports the robot frame, so mixing the two would silently offset
+    every move by the deck origin."""
+    corner = self.deck.slot_locations[0]
+    with patch.object(
+      self.backend, "_run_command", return_value=self._save_position_result(0.0, 0.0, 0.0)
+    ):
+      await self.backend.move_channel_x(0, corner.x)
+
+    self.assertAlmostEqual(mock_move.call_args.kwargs["location_x"], 0.0)
+
+  @patch("ot_api.lh.move_arm")
+  async def test_move_channel_uses_right_pipette_for_channel_1(self, mock_move):
+    """Channel 1 is the right mount; the pose query must name that pipette."""
+    with patch.object(
+      self.backend, "_run_command", return_value=self._save_position_result(1.0, 2.0, 3.0)
+    ) as mock_command:
+      await self.backend.move_channel_x(1, 50.0)
+
+    mock_command.assert_called_once_with("savePosition", {"pipetteId": "right-pipette-id"})
+    self.assertEqual(mock_move.call_args.kwargs["pipette_id"], "right-pipette-id")
+
+  async def test_move_channel_rejects_unknown_channel(self):
+    """An out-of-range channel raises NoChannelError rather than a masked error."""
+    with self.assertRaises(NoChannelError):
+      await self.backend.move_channel_x(7, 50.0)
+
 
 def _make_backend_with_pipettes(left_name="p300_single_gen2", right_name="p20_single_gen2"):
   """Create a backend with pipette state set directly (no ot_api needed)."""

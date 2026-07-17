@@ -592,49 +592,48 @@ class OpentronsBackend(LiquidHandlerBackend):
     return pipettes[channel]
 
   def _current_channel_position(self, channel: int) -> Tuple[str, Coordinate]:
-    """Return the pipette id and current coordinate for a given channel."""
+    """Return the pipette id and its current position, in the deck frame.
+
+    `savePosition` reports the pipette critical point in the robot frame, while callers work in
+    the deck frame, so the pose is rebased on the way out.
+    """
 
     pipette_id = self._pipette_id_for_channel(channel)
-    try:
-      res = self._ot.lh.save_position(pipette_id=pipette_id)
-      pos = res["data"]["result"]["position"]
-      current = Coordinate(pos["x"], pos["y"], pos["z"])
-    except Exception as exc:
-      raise RuntimeError("Failed to query current pipette position") from exc
-
-    return pipette_id, current
+    result = self._run_command("savePosition", {"pipetteId": pipette_id})
+    pos = result["result"]["position"]
+    return pipette_id, self._robot_to_deck_frame(Coordinate(pos["x"], pos["y"], pos["z"]))
 
   async def prepare_for_manual_channel_operation(self, channel: int):
     """Validate channel exists (no-op otherwise)."""
 
     _ = self._pipette_id_for_channel(channel)
 
-  async def move_channel_x(self, channel: int, x: float):
-    """Move a channel to an absolute x coordinate using savePosition to seed pose."""
+  async def _move_channel_axis(self, channel: int, axis: str, value: float):
+    """Move one axis of a channel to an absolute deck-frame coordinate, holding the other two."""
 
     pipette_id, current = self._current_channel_position(channel)
-    target = Coordinate(x=x, y=current.y, z=current.z)
+    target = {"x": current.x, "y": current.y, "z": current.z}
+    target[axis] = value
     await self.move_pipette_head(
-      location=target, minimum_z_height=self.traversal_height, pipette_id=pipette_id
+      location=self._deck_to_robot_frame(Coordinate(**target)),
+      minimum_z_height=self.traversal_height,
+      pipette_id=pipette_id,
     )
+
+  async def move_channel_x(self, channel: int, x: float):
+    """Move a channel to an absolute x coordinate in the deck frame."""
+
+    await self._move_channel_axis(channel, "x", x)
 
   async def move_channel_y(self, channel: int, y: float):
-    """Move a channel to an absolute y coordinate using savePosition to seed pose."""
+    """Move a channel to an absolute y coordinate in the deck frame."""
 
-    pipette_id, current = self._current_channel_position(channel)
-    target = Coordinate(x=current.x, y=y, z=current.z)
-    await self.move_pipette_head(
-      location=target, minimum_z_height=self.traversal_height, pipette_id=pipette_id
-    )
+    await self._move_channel_axis(channel, "y", y)
 
   async def move_channel_z(self, channel: int, z: float):
-    """Move a channel to an absolute z coordinate using savePosition to seed pose."""
+    """Move a channel to an absolute z coordinate in the deck frame."""
 
-    pipette_id, current = self._current_channel_position(channel)
-    target = Coordinate(x=current.x, y=current.y, z=z)
-    await self.move_pipette_head(
-      location=target, minimum_z_height=self.traversal_height, pipette_id=pipette_id
-    )
+    await self._move_channel_axis(channel, "z", z)
 
   async def move_pipette_head(
     self,
@@ -694,6 +693,10 @@ class OpentronsBackend(LiquidHandlerBackend):
 
   def _deck_to_robot_frame(self, location: Coordinate) -> Coordinate:
     """Convert a deck-frame coordinate to the robot's motion frame."""
+    raise NotImplementedError
+
+  def _robot_to_deck_frame(self, location: Coordinate) -> Coordinate:
+    """Convert a robot-frame coordinate to the deck frame. Inverse of `_deck_to_robot_frame`."""
     raise NotImplementedError
 
   def _get_default_aspiration_flow_rate(self, pipette_name: str) -> float:
@@ -763,6 +766,9 @@ class OpentronsOT2Backend(OpentronsBackend):
     slot 1's position in the deck frame, so subtract it.
     """
     return location - cast(OTDeck, self.deck).slot_locations[0]
+
+  def _robot_to_deck_frame(self, location: Coordinate) -> Coordinate:
+    return location + cast(OTDeck, self.deck).slot_locations[0]
 
   def _get_default_aspiration_flow_rate(self, pipette_name: str) -> float:
     """Get the default aspiration flow rate for the specified pipette in uL/s.
