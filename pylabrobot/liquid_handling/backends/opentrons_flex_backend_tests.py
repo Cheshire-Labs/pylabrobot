@@ -284,6 +284,22 @@ class Flex96PipettingTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(command, "blowOutInPlace")
     self.assertEqual(params, {"pipetteId": "96id", "flowRate": 50.0})
 
+  async def test_unsafe_ungrip_labware(self):
+    backend = self._backend_with_96()
+    with patch.object(backend, "_run_command") as run:
+      await backend.unsafe_ungrip_labware()
+    command, params = run.call_args.args
+    self.assertEqual(command, "unsafe/ungripLabware")
+    self.assertEqual(params, {})
+
+  async def test_unsafe_drop_tip_in_place(self):
+    backend = self._backend_with_96()
+    with patch.object(backend, "_run_command") as run:
+      await backend.unsafe_drop_tip_in_place()
+    command, params = run.call_args.args
+    self.assertEqual(command, "unsafe/dropTipInPlace")
+    self.assertEqual(params, {"pipetteId": "96id"})
+
   async def test_configure_nozzle_layout_all_sends_just_the_style(self):
     backend = self._backend_with_96()
     with patch.object(backend, "_run_command") as run:

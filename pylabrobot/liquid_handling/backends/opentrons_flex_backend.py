@@ -538,6 +538,25 @@ class OpentronsFlexBackend(OpentronsBackend):
     pipette_id = self._pipette_id_for_channel(use_channel)
     self._run_command("blowOutInPlace", {"pipetteId": pipette_id, "flowRate": flow_rate})
 
+  # --- error recovery (unsafe/*): run after an interrupted move to reach a safe state ---
+
+  async def unsafe_ungrip_labware(self) -> None:
+    """Open the gripper to release labware after an interrupted move (homes the gripper axis)."""
+    self._run_command("unsafe/ungripLabware", {})
+
+  async def unsafe_drop_tip_in_place(self, use_channel: int = 0) -> None:
+    """Drop the tip where the pipette currently is, for recovery when a normal drop cannot run."""
+    self._run_command(
+      "unsafe/dropTipInPlace", {"pipetteId": self._pipette_id_for_channel(use_channel)}
+    )
+
+  async def unsafe_blow_out_in_place(self, flow_rate: float, use_channel: int = 0) -> None:
+    """Blow out where the pipette currently is, for recovery when a normal blow-out cannot run."""
+    self._run_command(
+      "unsafe/blowOutInPlace",
+      {"pipetteId": self._pipette_id_for_channel(use_channel), "flowRate": flow_rate},
+    )
+
   # --- 96-channel head pipetting (valid only when a 96 head is mounted) ---
 
   async def configure_nozzle_layout(
