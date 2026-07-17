@@ -251,6 +251,10 @@ class OpentronsFlexBackend(OpentronsBackend):
     version = self.ot_api_version
     if version is None:
       raise RuntimeError(f"{command} requires setup() to have run, to read the robot's version.")
+    # A dev or simulator build reports "0.0.0.dev0" but runs current code, so it supports every
+    # command; only gate released builds by their version number.
+    if "dev" in version:
+      return
     if _version_tuple(version) < _version_tuple(_FLEX_ROBOT_COMMANDS_VERSION):
       raise RuntimeError(
         f"{command} requires Opentrons robot software {_FLEX_ROBOT_COMMANDS_VERSION} or newer, "

@@ -136,6 +136,13 @@ class FlexRobotCommandTests(unittest.IsolatedAsyncioTestCase):
     await self.backend.move_axes_to({"x": 1.0})
     self.run_command.assert_called_once()
 
+  async def test_robot_commands_allowed_on_a_dev_build(self):
+    """A dev or simulator build reports "0.0.0.dev0" but runs current code, so it is capable
+    even though its version number sorts below the gate."""
+    self.backend.ot_api_version = "0.0.0.dev0"
+    await self.backend.move_axes_to({"x": 1.0})
+    self.run_command.assert_called_once()
+
 
 class FlexBackendUnitTests(unittest.TestCase):
   def test_has_one_arm_for_the_gripper(self):
