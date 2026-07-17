@@ -134,8 +134,14 @@ class FlexPipettingFrameTests(unittest.IsolatedAsyncioTestCase):
     well = MagicMock()
     well.get_location_wrt.return_value = Coordinate(50.0, 60.0, 70.0)
     op = SingleChannelAspiration(
-      resource=well, offset=Coordinate.zero(), tip=_tip(1000), volume=100.0,
-      flow_rate=None, liquid_height=None, blow_out_air_volume=None, mix=None,
+      resource=well,
+      offset=Coordinate.zero(),
+      tip=_tip(1000),
+      volume=100.0,
+      flow_rate=None,
+      liquid_height=None,
+      blow_out_air_volume=None,
+      mix=None,
     )
     await backend.aspirate([op], [0])
     first_location = move_pipette_head.call_args_list[0].kwargs["location"]
@@ -146,8 +152,14 @@ class FlexPipettingFrameTests(unittest.IsolatedAsyncioTestCase):
     well = MagicMock()
     well.get_location_wrt.return_value = Coordinate(12.0, 34.0, 56.0)
     op = SingleChannelDispense(
-      resource=well, offset=Coordinate.zero(), tip=_tip(1000), volume=100.0,
-      flow_rate=None, liquid_height=None, blow_out_air_volume=None, mix=None,
+      resource=well,
+      offset=Coordinate.zero(),
+      tip=_tip(1000),
+      volume=100.0,
+      flow_rate=None,
+      liquid_height=None,
+      blow_out_air_volume=None,
+      mix=None,
     )
     await backend.dispense([op], [0])
     first_location = move_pipette_head.call_args_list[0].kwargs["location"]
@@ -167,7 +179,9 @@ class FlexGripperTests(unittest.IsolatedAsyncioTestCase):
 
     await backend.pick_up_resource(
       ResourcePickup(
-        resource=plate, offset=Coordinate.zero(), pickup_distance_from_top=0,
+        resource=plate,
+        offset=Coordinate.zero(),
+        pickup_distance_from_top=0,
         direction=GripDirection.FRONT,
       )
     )
@@ -178,7 +192,10 @@ class FlexGripperTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(definition["dimensions"]["xDimension"], 127.0)
 
     # loadLabware used the slot NAME and an INT version (the Flex shape, not the OT-2 numeric slot)
-    command_type, params = backend._run_command.call_args[0][0], backend._run_command.call_args[0][1]
+    command_type, params = (
+      backend._run_command.call_args[0][0],
+      backend._run_command.call_args[0][1],
+    )
     self.assertEqual(command_type, "loadLabware")
     self.assertEqual(params["location"], {"slotName": "C2"})
     self.assertIsInstance(params["version"], int)

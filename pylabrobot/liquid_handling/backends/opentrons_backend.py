@@ -731,9 +731,7 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Whether a tip-drop target resource should route to the robot's trash."""
     raise NotImplementedError
 
-  def _drop_tip_in_trash(
-    self, pipette_id: str, offset_x: float, offset_y: float, offset_z: float
-  ):
+  def _drop_tip_in_trash(self, pipette_id: str, offset_x: float, offset_y: float, offset_z: float):
     """Drop the mounted tip into the robot's trash addressable area."""
     raise NotImplementedError
 
@@ -854,9 +852,7 @@ class OpentronsOT2Backend(OpentronsBackend):
       and resource.name == "trash"
     )
 
-  def _drop_tip_in_trash(
-    self, pipette_id: str, offset_x: float, offset_y: float, offset_z: float
-  ):
+  def _drop_tip_in_trash(self, pipette_id: str, offset_x: float, offset_y: float, offset_z: float):
     self._ot.lh.move_to_addressable_area_for_drop_tip(
       pipette_id=pipette_id,
       offset_x=offset_x,

@@ -73,9 +73,7 @@ class OpentronsFlexBackend(OpentronsBackend):
     for slot, resource in deck.slots.items():
       column = int(slot[1])
       fixture = (
-        "trashBinAdapter"
-        if column == 3 and isinstance(resource, Trash)
-        else column_fixture[column]
+        "trashBinAdapter" if column == 3 and isinstance(resource, Trash) else column_fixture[column]
       )
       config.append({"cutoutId": f"cutout{slot}", "cutoutFixtureId": fixture})
     return config
@@ -137,9 +135,7 @@ class OpentronsFlexBackend(OpentronsBackend):
   def _resource_is_trash(self, resource: Resource) -> bool:
     return resource.name == "trash"
 
-  def _drop_tip_in_trash(
-    self, pipette_id: str, offset_x: float, offset_y: float, offset_z: float
-  ):
+  def _drop_tip_in_trash(self, pipette_id: str, offset_x: float, offset_y: float, offset_z: float):
     self._run_command(
       "moveToAddressableAreaForDropTip",
       {
