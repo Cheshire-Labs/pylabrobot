@@ -56,7 +56,7 @@ class _OTChatterboxModule:
 
   Provides the sub-namespaces and reads the real backend touches: ``runs.create``,
   ``lh.add_mounted_pipettes``, ``health.get``, ``labware.define``,
-  ``modules.list_connected_modules`` and ``lh.save_position`` return canned data;
+  ``modules.list_connected_modules`` and ``requestor.post`` return canned data;
   everything else is recorded and returns ``None``. ``run_id`` stays ``None`` so
   ``stop()`` skips the cancel request.
   """
@@ -72,14 +72,12 @@ class _OTChatterboxModule:
       self, "labware", {"define": lambda: {"data": {"definitionUri": "pylabrobot/chatterbox/1"}}}
     )
     self.modules = _RecordingNamespace(self, "modules", {"list_connected_modules": lambda: []})
-    self.requestor = _RecordingNamespace(self, "requestor")
+    # _run_command posts commands through the requestor; return a succeeded command with a canned
+    # position so savePosition-style readbacks resolve during a dry run.
+    ok = {"data": {"status": "succeeded", "result": {"position": {"x": 0, "y": 0, "z": 0}}}}
+    self.requestor = _RecordingNamespace(self, "requestor", {"post": lambda: ok})
     self.lh = _RecordingNamespace(
-      self,
-      "lh",
-      {
-        "add_mounted_pipettes": lambda: (left_pipette, right_pipette),
-        "save_position": lambda: {"data": {"result": {"position": {"x": 0, "y": 0, "z": 0}}}},
-      },
+      self, "lh", {"add_mounted_pipettes": lambda: (left_pipette, right_pipette)}
     )
 
   def log(self, qualified: str, args: tuple, kwargs: dict):

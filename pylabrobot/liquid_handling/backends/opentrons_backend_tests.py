@@ -190,6 +190,23 @@ class OpentronsBackendCommandTests(unittest.IsolatedAsyncioTestCase):
     with no_volume_tracking():
       await self.lh.dispense(self.plate["A1"], vols=[10])
 
+  @patch("ot_api.lh.dispense_in_place")
+  @patch("ot_api.lh.move_arm")
+  async def test_dispense_forwards_push_out_as_pushout(self, mock_move, mock_dispense):
+    """push_out reaches the backend and is forwarded to dispense_in_place as pushOut."""
+    await self.test_aspirate()  # aspirate first
+    with no_volume_tracking():
+      await self.lh.dispense(self.plate["A1"], vols=[10], push_out=5.0)
+    self.assertEqual(mock_dispense.call_args.kwargs.get("pushOut"), 5.0)
+
+  @patch("ot_api.lh.dispense_in_place")
+  @patch("ot_api.lh.move_arm")
+  async def test_dispense_without_push_out_omits_pushout(self, mock_move, mock_dispense):
+    await self.test_aspirate()
+    with no_volume_tracking():
+      await self.lh.dispense(self.plate["A1"], vols=[10])
+    self.assertNotIn("pushOut", mock_dispense.call_args.kwargs)
+
   # -- characterization of the remaining ot_api call sites (Phase 0 safety net) --
 
   @patch("ot_api.health.home")

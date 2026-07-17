@@ -49,6 +49,16 @@ class OpentronsChatterboxTests(unittest.IsolatedAsyncioTestCase):
     assert self.backend.left_pipette is not None and self.backend.right_pipette is not None
     self.assertEqual(self.backend.left_pipette["name"], "p20_single_gen2")
 
+  async def test_run_command_op_records_through_the_requestor(self):
+    """A _run_command op (here blow_out_in_place) records through the recorded requestor transport,
+    instead of escaping the dry run and raising URLError over real HTTP."""
+    await self.backend.blow_out_in_place(flow_rate=40.0, use_channel=0)
+    posts = [args for name, args, _ in self.backend.commands if name == "requestor.post"]
+    self.assertTrue(
+      any(body["data"]["commandType"] == "blowOutInPlace" for _path, body in posts),
+      self.backend.commands,
+    )
+
   async def test_full_protocol_records_one_wire_call_per_operation(self):
     """A pickup -> aspirate -> dispense -> trash-discard records exactly one
     wire call each, via the real backend logic."""
