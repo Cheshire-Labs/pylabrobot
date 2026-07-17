@@ -3,7 +3,7 @@ import json
 import logging
 import urllib.request
 import uuid
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
 
 from pylabrobot import utils
 from pylabrobot.io import LOG_LEVEL_IO
@@ -32,7 +32,9 @@ from pylabrobot.resources import (
   Tip,
 )
 from pylabrobot.resources.opentrons import OTDeck
+from pylabrobot.resources.plate import Plate
 from pylabrobot.resources.tip_rack import TipRack
+from pylabrobot.resources.well import Well
 
 try:
   import ot_api
@@ -140,6 +142,7 @@ class OpentronsBackend(LiquidHandlerBackend):
     self.traversal_height = 120
     self._tip_racks: Dict[str, Union[int, str]] = {}  # tip_rack.name -> slot
     self._plr_name_to_load_name: Dict[str, str] = {}
+    self._loaded_plates: Set[str] = set()  # plates loaded for well-referencing commands
 
   def serialize(self) -> dict:
     return {
@@ -176,6 +179,7 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Cancel any active OT run, then clear labware definitions."""
     self._plr_name_to_load_name = {}
     self._tip_racks = {}
+    self._loaded_plates = set()
     self.left_pipette = None
     self.right_pipette = None
 
@@ -531,8 +535,18 @@ class OpentronsBackend(LiquidHandlerBackend):
       pipette_id=pipette_id,
     )
 
-  async def dispense(self, ops: List[SingleChannelDispense], use_channels: List[int]):
-    """Dispense liquid from the specified resource using pip."""
+  async def dispense(
+    self,
+    ops: List[SingleChannelDispense],
+    use_channels: List[int],
+    *,
+    push_out: Optional[float] = None,
+  ):
+    """Dispense liquid from the specified resource using pip.
+
+    ``push_out`` (uL) pushes the plunger a little past empty for accurate low-volume dispensing;
+    it is an Opentrons-specific extra passed through the frontend's backend_kwargs.
+    """
 
     pipette_id = self._get_liquid_pipette(ops)
     op = ops[0]
@@ -552,11 +566,14 @@ class OpentronsBackend(LiquidHandlerBackend):
       pipette_id=pipette_id,
     )
 
-    self._ot.lh.dispense_in_place(
-      volume=volume,
-      flow_rate=flow_rate,
-      pipette_id=pipette_id,
-    )
+    dispense_kwargs: Dict[str, Union[float, str]] = {
+      "volume": volume,
+      "flow_rate": flow_rate,
+      "pipette_id": pipette_id,
+    }
+    if push_out is not None:
+      dispense_kwargs["pushOut"] = push_out
+    self._ot.lh.dispense_in_place(**dispense_kwargs)
 
     if op.mix is not None:
       for _ in range(op.mix.repetitions):
@@ -583,6 +600,142 @@ class OpentronsBackend(LiquidHandlerBackend):
 
   async def home(self):
     self._ot.health.home()
+
+  # --- pipetting extras (reach via lh.backend); shared by the OT-2 and the Flex ---
+
+  async def blow_out_in_place(self, flow_rate: float, use_channel: int = 0) -> None:
+    """Blow out at the current position, clearing residual liquid from the tip.
+
+    ``flow_rate`` is in uL/s. ``use_channel`` selects the mount and resolves through the same
+    channel map as the pipetting commands.
+    """
+    pipette_id = self._pipette_id_for_channel(use_channel)
+    self._run_command("blowOutInPlace", {"pipetteId": pipette_id, "flowRate": flow_rate})
+
+  async def unsafe_drop_tip_in_place(self, use_channel: int = 0) -> None:
+    """Drop the tip where the pipette is, for recovery when a normal drop cannot run."""
+    self._run_command(
+      "unsafe/dropTipInPlace", {"pipetteId": self._pipette_id_for_channel(use_channel)}
+    )
+
+  async def unsafe_blow_out_in_place(self, flow_rate: float, use_channel: int = 0) -> None:
+    """Blow out where the pipette is, for recovery when a normal blow-out cannot run."""
+    self._run_command(
+      "unsafe/blowOutInPlace",
+      {"pipetteId": self._pipette_id_for_channel(use_channel), "flowRate": flow_rate},
+    )
+
+  # --- well-referencing commands: load the plate, then reference a well ---
+
+  def _build_plate_definition(
+    self, plate: Plate, grip_distance_from_top: Optional[float] = None
+  ) -> dict:
+    """Build a robot-server labware definition from a PLR plate's geometry.
+
+    Mirrors the tip-rack definition builder, but for a well plate: wells carry a liquid volume
+    and depth rather than a tip length, so touch_tip and liquid_probe get the real well geometry.
+    """
+    ot_slot_size_y = 86
+    definition: dict = {
+      "schemaVersion": 2,
+      "version": 1,
+      "namespace": "pylabrobot",
+      "metadata": {
+        "displayName": self.get_ot_name(plate.name),
+        "displayCategory": "wellPlate",
+        "displayVolumeUnits": "µL",
+      },
+      "brand": {"brand": "unknown"},
+      "parameters": {
+        "format": "irregular",
+        "isTiprack": False,
+        "loadName": self.get_ot_name(plate.name),
+        "isMagneticModuleCompatible": False,
+      },
+      "ordering": utils.reshape_2d(
+        [self.get_ot_name(well.name) for well in plate.get_all_items()],
+        (plate.num_items_x, plate.num_items_y),
+      ),
+      "cornerOffsetFromSlot": {
+        "x": 0,
+        "y": ot_slot_size_y - plate.get_absolute_size_y(),
+        "z": 0,
+      },
+      "dimensions": {
+        "xDimension": plate.get_absolute_size_x(),
+        "yDimension": plate.get_absolute_size_y(),
+        "zDimension": plate.get_absolute_size_z(),
+      },
+      "wells": {
+        self.get_ot_name(well.name): {
+          "depth": well.get_absolute_size_z(),
+          "x": cast(Coordinate, well.location).x + well.get_absolute_size_x() / 2,
+          "y": cast(Coordinate, well.location).y + well.get_absolute_size_y() / 2,
+          "z": cast(Coordinate, well.location).z,
+          "shape": "circular",
+          "diameter": well.get_absolute_size_x(),
+          "totalLiquidVolume": well.max_volume,
+        }
+        for well in plate.get_all_items()
+      },
+      "groups": [
+        {
+          "wells": [self.get_ot_name(well.name) for well in plate.get_all_items()],
+          "metadata": {"wellBottomShape": "flat"},
+        }
+      ],
+    }
+    if grip_distance_from_top is not None:
+      definition["gripHeightFromLabwareBottom"] = max(
+        0.0, plate.get_absolute_size_z() - grip_distance_from_top
+      )
+    return definition
+
+  async def _assign_plate(
+    self, plate: Plate, grip_distance_from_top: Optional[float] = None
+  ) -> None:
+    if plate.name in self._loaded_plates:
+      return
+    data = self._ot.labware.define(self._build_plate_definition(plate, grip_distance_from_top))
+    namespace, definition, version = data["data"]["definitionUri"].split("/")
+    self._load_labware_at_slot(
+      load_name=definition,
+      namespace=namespace,
+      version=version,
+      slot=self._get_slot_for_resource(plate),
+      labware_id=self.get_ot_name(plate.name),
+      display_name=self.get_ot_name(plate.name),
+    )
+    self._loaded_plates.add(plate.name)
+
+  def _plate_of(self, well: Well) -> Plate:
+    plate = well.parent
+    if not isinstance(plate, Plate):
+      raise ValueError(f"Well {well.name!r} is not part of a plate.")
+    return plate
+
+  def _well_location(self, offset: Coordinate) -> dict:
+    return {"origin": "bottom", "offset": {"x": offset.x, "y": offset.y, "z": offset.z}}
+
+  async def touch_tip(
+    self, well: Well, radius: float = 1.0, use_channel: int = 0, offset: Optional[Coordinate] = None
+  ) -> None:
+    """Touch the tip to the sides of ``well`` to shed droplets.
+
+    ``radius`` is the fraction of the well radius the tip moves toward (1.0 = the wall).
+    """
+    plate = self._plate_of(well)
+    await self._assign_plate(plate)
+    self._run_command(
+      "touchTip",
+      {
+        "pipetteId": self._pipette_id_for_channel(use_channel),
+        "labwareId": self.get_ot_name(plate.name),
+        "wellName": self.get_ot_name(well.name),
+        "wellLocation": self._well_location(offset or Coordinate.zero()),
+        "radius": radius,
+      },
+    )
 
   async def pick_up_tips96(self, pickup: PickupTipRack):
     raise NotImplementedError("The Opentrons backend does not support the 96 head.")

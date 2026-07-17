@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -19,6 +19,7 @@ from pylabrobot.liquid_handling.standard import (
 from pylabrobot.resources import Coordinate, Tip, no_volume_tracking
 from pylabrobot.resources.celltreat import celltreat_96_wellplate_350uL_Fb
 from pylabrobot.resources.opentrons import OTDeck, opentrons_96_filtertiprack_20ul
+from pylabrobot.resources.plate import Plate
 from pylabrobot.resources.well import Well
 
 
@@ -376,6 +377,56 @@ def _make_backend_with_pipettes(left_name="p300_single_gen2", right_name="p20_si
   backend.left_pipette_has_tip = False
   backend.right_pipette_has_tip = False
   return backend
+
+
+class OpentronsSharedPipettingExtrasTests(unittest.IsolatedAsyncioTestCase):
+  """The fine-pipetting extras hoisted to the shared base must run on the OT-2, not just the Flex.
+
+  These commands are the same robot-server protocol-engine commands on both robots, so the OT-2
+  drives them through the inherited base methods.
+  """
+
+  def setUp(self):
+    self.backend = _make_backend_with_pipettes()  # OT-2, left p300, right p20
+    self.backend._plr_name_to_load_name = {}  # the test helper bypasses __init__
+
+  async def test_blow_out_in_place(self):
+    with patch.object(self.backend, "_run_command") as run:
+      await self.backend.blow_out_in_place(flow_rate=40.0)
+    command, params = run.call_args.args
+    self.assertEqual(command, "blowOutInPlace")
+    self.assertEqual(params, {"pipetteId": "left-id", "flowRate": 40.0})
+
+  async def test_unsafe_drop_tip_in_place(self):
+    with patch.object(self.backend, "_run_command") as run:
+      await self.backend.unsafe_drop_tip_in_place()
+    command, params = run.call_args.args
+    self.assertEqual(command, "unsafe/dropTipInPlace")
+    self.assertEqual(params, {"pipetteId": "left-id"})
+
+  async def test_unsafe_blow_out_in_place(self):
+    with patch.object(self.backend, "_run_command") as run:
+      await self.backend.unsafe_blow_out_in_place(flow_rate=30.0)
+    command, params = run.call_args.args
+    self.assertEqual(command, "unsafe/blowOutInPlace")
+    self.assertEqual(params, {"pipetteId": "left-id", "flowRate": 30.0})
+
+  async def test_touch_tip_loads_the_plate_and_emits_touch_tip(self):
+    well = MagicMock(spec=Well)
+    well.name = "plate_A1"
+    plate = MagicMock(spec=Plate)
+    plate.name = "plate"
+    well.parent = plate
+    with (
+      patch.object(self.backend, "_assign_plate", new=AsyncMock()) as assign,
+      patch.object(self.backend, "_run_command") as run,
+    ):
+      await self.backend.touch_tip(well, radius=0.5)
+    assign.assert_awaited_once_with(plate)
+    command, params = run.call_args.args
+    self.assertEqual(command, "touchTip")
+    self.assertEqual(params["radius"], 0.5)
+    self.assertEqual(params["pipetteId"], "left-id")
 
 
 class OpentronsSharedHelperTests(unittest.TestCase):

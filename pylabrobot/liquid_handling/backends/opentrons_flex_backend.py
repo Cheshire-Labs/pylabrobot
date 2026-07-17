@@ -1,6 +1,5 @@
 from typing import Dict, List, Literal, Optional, Tuple, Union, cast
 
-from pylabrobot import utils
 from pylabrobot.liquid_handling.backends.opentrons_backend import (
   OpentronsBackend,
   _version_tuple,
@@ -104,13 +103,11 @@ class OpentronsFlexBackend(OpentronsBackend):
     super().__init__(host, port)
     self._loaded_labware: Dict[str, str] = {}  # resource.name -> opentrons labware id
     self._pending_pickup: Optional[Tuple[str, Resource]] = None
-    self._loaded_plates: set[str] = set()  # plates loaded for well-referencing commands
 
   async def setup(self, skip_home: bool = False):
     await super().setup(skip_home=skip_home)
     self._loaded_labware = {}
     self._pending_pickup = None
-    self._loaded_plates = set()
     if self._has_96_head:
       # A 96-channel head must be told its nozzle layout before it will pipette; ALL selects the
       # full head. Callers re-configure for partial-column work via configure_nozzle_layout.
@@ -139,7 +136,6 @@ class OpentronsFlexBackend(OpentronsBackend):
     await super().stop()
     self._loaded_labware = {}
     self._pending_pickup = None
-    self._loaded_plates = set()
 
   async def _configure_deck(self):
     self._request(
@@ -417,97 +413,8 @@ class OpentronsFlexBackend(OpentronsBackend):
       params["force"] = force
     self._run_command("robot/closeGripperJaw", params)
 
-  # --- well-referencing commands: load the plate, then reference a well ---
-
-  def _build_plate_definition(
-    self, plate: Plate, grip_distance_from_top: Optional[float] = None
-  ) -> dict:
-    """Build a robot-server labware definition from a PLR plate's geometry.
-
-    Mirrors the tip-rack definition builder, but for a well plate: wells carry a liquid volume
-    and depth rather than a tip length, so touch_tip and liquid_probe get the real well geometry.
-    """
-    ot_slot_size_y = 86
-    definition: dict = {
-      "schemaVersion": 2,
-      "version": 1,
-      "namespace": "pylabrobot",
-      "metadata": {
-        "displayName": self.get_ot_name(plate.name),
-        "displayCategory": "wellPlate",
-        "displayVolumeUnits": "µL",
-      },
-      "brand": {"brand": "unknown"},
-      "parameters": {
-        "format": "irregular",
-        "isTiprack": False,
-        "loadName": self.get_ot_name(plate.name),
-        "isMagneticModuleCompatible": False,
-      },
-      "ordering": utils.reshape_2d(
-        [self.get_ot_name(well.name) for well in plate.get_all_items()],
-        (plate.num_items_x, plate.num_items_y),
-      ),
-      "cornerOffsetFromSlot": {
-        "x": 0,
-        "y": ot_slot_size_y - plate.get_absolute_size_y(),
-        "z": 0,
-      },
-      "dimensions": {
-        "xDimension": plate.get_absolute_size_x(),
-        "yDimension": plate.get_absolute_size_y(),
-        "zDimension": plate.get_absolute_size_z(),
-      },
-      "wells": {
-        self.get_ot_name(well.name): {
-          "depth": well.get_absolute_size_z(),
-          "x": cast(Coordinate, well.location).x + well.get_absolute_size_x() / 2,
-          "y": cast(Coordinate, well.location).y + well.get_absolute_size_y() / 2,
-          "z": cast(Coordinate, well.location).z,
-          "shape": "circular",
-          "diameter": well.get_absolute_size_x(),
-          "totalLiquidVolume": well.max_volume,
-        }
-        for well in plate.get_all_items()
-      },
-      "groups": [
-        {
-          "wells": [self.get_ot_name(well.name) for well in plate.get_all_items()],
-          "metadata": {"wellBottomShape": "flat"},
-        }
-      ],
-    }
-    if grip_distance_from_top is not None:
-      definition["gripHeightFromLabwareBottom"] = max(
-        0.0, plate.get_absolute_size_z() - grip_distance_from_top
-      )
-    return definition
-
-  async def _assign_plate(
-    self, plate: Plate, grip_distance_from_top: Optional[float] = None
-  ) -> None:
-    if plate.name in self._loaded_plates:
-      return
-    data = self._ot.labware.define(self._build_plate_definition(plate, grip_distance_from_top))
-    namespace, definition, version = data["data"]["definitionUri"].split("/")
-    self._load_labware_at_slot(
-      load_name=definition,
-      namespace=namespace,
-      version=version,
-      slot=self._get_slot_for_resource(plate),
-      labware_id=self.get_ot_name(plate.name),
-      display_name=self.get_ot_name(plate.name),
-    )
-    self._loaded_plates.add(plate.name)
-
-  def _plate_of(self, well: Well) -> Plate:
-    plate = well.parent
-    if not isinstance(plate, Plate):
-      raise ValueError(f"Well {well.name!r} is not part of a plate.")
-    return plate
-
-  def _well_location(self, offset: Coordinate) -> dict:
-    return {"origin": "bottom", "offset": {"x": offset.x, "y": offset.y, "z": offset.z}}
+  # --- well-referencing sensing: liquid_probe needs the Flex pressure sensor (the plate-load
+  # helpers, touch_tip, and blow_out_in_place live on the shared base) ---
 
   async def liquid_probe(
     self, well: Well, use_channel: int = 0, offset: Optional[Coordinate] = None
@@ -553,55 +460,12 @@ class OpentronsFlexBackend(OpentronsBackend):
     # z_position is absent (not null) when no liquid is found, so read it defensively.
     return cast(Optional[float], result["result"].get("z_position"))
 
-  async def touch_tip(
-    self, well: Well, radius: float = 1.0, use_channel: int = 0, offset: Optional[Coordinate] = None
-  ) -> None:
-    """Touch the tip to the sides of ``well`` to shed droplets.
-
-    ``radius`` is the fraction of the well radius the tip moves toward (1.0 = the wall).
-    """
-    plate = self._plate_of(well)
-    await self._assign_plate(plate)
-    self._run_command(
-      "touchTip",
-      {
-        "pipetteId": self._pipette_id_for_channel(use_channel),
-        "labwareId": self.get_ot_name(plate.name),
-        "wellName": self.get_ot_name(well.name),
-        "wellLocation": self._well_location(offset or Coordinate.zero()),
-        "radius": radius,
-      },
-    )
-
-  # --- pipetting extras exposed on the backend (reach via lh.backend) ---
-
-  async def blow_out_in_place(self, flow_rate: float, use_channel: int = 0) -> None:
-    """Blow out at the current position, clearing residual liquid from the tip.
-
-    ``flow_rate`` is in uL/s. ``use_channel`` selects the mount (0 = left, which is also the
-    96-head); it resolves through the same channel map as the pipetting commands.
-    """
-    pipette_id = self._pipette_id_for_channel(use_channel)
-    self._run_command("blowOutInPlace", {"pipetteId": pipette_id, "flowRate": flow_rate})
-
-  # --- error recovery (unsafe/*): run after an interrupted move to reach a safe state ---
+  # --- error recovery (unsafe/*): the gripper release is Flex-only; the pipette drop/blow-out
+  # recovery variants are on the shared base ---
 
   async def unsafe_ungrip_labware(self) -> None:
     """Open the gripper to release labware after an interrupted move (homes the gripper axis)."""
     self._run_command("unsafe/ungripLabware", {})
-
-  async def unsafe_drop_tip_in_place(self, use_channel: int = 0) -> None:
-    """Drop the tip where the pipette currently is, for recovery when a normal drop cannot run."""
-    self._run_command(
-      "unsafe/dropTipInPlace", {"pipetteId": self._pipette_id_for_channel(use_channel)}
-    )
-
-  async def unsafe_blow_out_in_place(self, flow_rate: float, use_channel: int = 0) -> None:
-    """Blow out where the pipette currently is, for recovery when a normal blow-out cannot run."""
-    self._run_command(
-      "unsafe/blowOutInPlace",
-      {"pipetteId": self._pipette_id_for_channel(use_channel), "flowRate": flow_rate},
-    )
 
   # --- 96-channel head pipetting (valid only when a 96 head is mounted) ---
 
