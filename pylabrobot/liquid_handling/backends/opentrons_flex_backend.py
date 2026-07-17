@@ -1,5 +1,6 @@
 from typing import Dict, List, Literal, Optional, Tuple, Union, cast
 
+from pylabrobot import utils
 from pylabrobot.liquid_handling.backends.opentrons_backend import (
   OpentronsBackend,
   _version_tuple,
@@ -17,8 +18,10 @@ from pylabrobot.liquid_handling.standard import (
 )
 from pylabrobot.resources import Coordinate, Resource
 from pylabrobot.resources.opentrons import FlexDeck
+from pylabrobot.resources.plate import Plate
 from pylabrobot.resources.tip_rack import TipRack
 from pylabrobot.resources.trash import Trash
+from pylabrobot.resources.well import Well
 
 # Addressable area exposed by the trashBinAdapter fixture at A3, used for tip disposal.
 _TRASH_ADDRESSABLE_AREA = "movableTrashA3"
@@ -95,11 +98,13 @@ class OpentronsFlexBackend(OpentronsBackend):
     super().__init__(host, port)
     self._loaded_labware: Dict[str, str] = {}  # resource.name -> opentrons labware id
     self._pending_pickup: Optional[Tuple[str, Resource]] = None
+    self._loaded_plates: set[str] = set()  # plates loaded for well-referencing commands
 
   async def setup(self, skip_home: bool = False):
     await super().setup(skip_home=skip_home)
     self._loaded_labware = {}
     self._pending_pickup = None
+    self._loaded_plates = set()
     if self._has_96_head:
       # A 96-channel head must be told its nozzle layout before it will pipette; ALL selects the
       # full head. Callers re-configure for partial-column work via configure_nozzle_layout.
@@ -125,6 +130,7 @@ class OpentronsFlexBackend(OpentronsBackend):
     await super().stop()
     self._loaded_labware = {}
     self._pending_pickup = None
+    self._loaded_plates = set()
 
   async def _configure_deck(self):
     self._request(
@@ -373,6 +379,153 @@ class OpentronsFlexBackend(OpentronsBackend):
         )
       params["force"] = force
     self._run_command("robot/closeGripperJaw", params)
+
+  # --- well-referencing commands: load the plate, then reference a well ---
+
+  def _build_plate_definition(self, plate: Plate) -> dict:
+    """Build a robot-server labware definition from a PLR plate's geometry.
+
+    Mirrors the tip-rack definition builder, but for a well plate: wells carry a liquid volume
+    and depth rather than a tip length, so touch_tip and liquid_probe get the real well geometry.
+    """
+    ot_slot_size_y = 86
+    return {
+      "schemaVersion": 2,
+      "version": 1,
+      "namespace": "pylabrobot",
+      "metadata": {
+        "displayName": self.get_ot_name(plate.name),
+        "displayCategory": "wellPlate",
+        "displayVolumeUnits": "µL",
+      },
+      "brand": {"brand": "unknown"},
+      "parameters": {
+        "format": "irregular",
+        "isTiprack": False,
+        "loadName": self.get_ot_name(plate.name),
+        "isMagneticModuleCompatible": False,
+      },
+      "ordering": utils.reshape_2d(
+        [self.get_ot_name(well.name) for well in plate.get_all_items()],
+        (plate.num_items_x, plate.num_items_y),
+      ),
+      "cornerOffsetFromSlot": {
+        "x": 0,
+        "y": ot_slot_size_y - plate.get_absolute_size_y(),
+        "z": 0,
+      },
+      "dimensions": {
+        "xDimension": plate.get_absolute_size_x(),
+        "yDimension": plate.get_absolute_size_y(),
+        "zDimension": plate.get_absolute_size_z(),
+      },
+      "wells": {
+        self.get_ot_name(well.name): {
+          "depth": well.get_absolute_size_z(),
+          "x": cast(Coordinate, well.location).x + well.get_absolute_size_x() / 2,
+          "y": cast(Coordinate, well.location).y + well.get_absolute_size_y() / 2,
+          "z": cast(Coordinate, well.location).z,
+          "shape": "circular",
+          "diameter": well.get_absolute_size_x(),
+          "totalLiquidVolume": well.max_volume,
+        }
+        for well in plate.get_all_items()
+      },
+      "groups": [
+        {
+          "wells": [self.get_ot_name(well.name) for well in plate.get_all_items()],
+          "metadata": {"wellBottomShape": "flat"},
+        }
+      ],
+    }
+
+  async def _assign_plate(self, plate: Plate) -> None:
+    if plate.name in self._loaded_plates:
+      return
+    data = self._ot.labware.define(self._build_plate_definition(plate))
+    namespace, definition, version = data["data"]["definitionUri"].split("/")
+    self._load_labware_at_slot(
+      load_name=definition,
+      namespace=namespace,
+      version=version,
+      slot=self._get_slot_for_resource(plate),
+      labware_id=self.get_ot_name(plate.name),
+      display_name=self.get_ot_name(plate.name),
+    )
+    self._loaded_plates.add(plate.name)
+
+  def _plate_of(self, well: Well) -> Plate:
+    plate = well.parent
+    if not isinstance(plate, Plate):
+      raise ValueError(f"Well {well.name!r} is not part of a plate.")
+    return plate
+
+  def _well_location(self, offset: Coordinate) -> dict:
+    return {"origin": "bottom", "offset": {"x": offset.x, "y": offset.y, "z": offset.z}}
+
+  async def liquid_probe(
+    self, well: Well, use_channel: int = 0, offset: Optional[Coordinate] = None
+  ) -> float:
+    """Probe downward in ``well`` until the pressure sensor detects liquid; return its z (mm).
+
+    Requires a tip on the selected channel. Raises if no liquid is found; use ``try_liquid_probe``
+    for the non-raising variant.
+    """
+    plate = self._plate_of(well)
+    await self._assign_plate(plate)
+    result = self._run_command(
+      "liquidProbe",
+      {
+        "pipetteId": self._pipette_id_for_channel(use_channel),
+        "labwareId": self.get_ot_name(plate.name),
+        "wellName": self.get_ot_name(well.name),
+        "wellLocation": self._well_location(offset or Coordinate.zero()),
+      },
+    )
+    # The server omits z_position when it finds no liquid (real hardware raises instead; a
+    # simulator without a pressure sensor just returns the final position).
+    z = result["result"].get("z_position")
+    if z is None:
+      raise RuntimeError(f"liquid_probe found no liquid in well {well.name!r}.")
+    return cast(float, z)
+
+  async def try_liquid_probe(
+    self, well: Well, use_channel: int = 0, offset: Optional[Coordinate] = None
+  ) -> Optional[float]:
+    """Like ``liquid_probe`` but return ``None`` instead of raising when no liquid is found."""
+    plate = self._plate_of(well)
+    await self._assign_plate(plate)
+    result = self._run_command(
+      "tryLiquidProbe",
+      {
+        "pipetteId": self._pipette_id_for_channel(use_channel),
+        "labwareId": self.get_ot_name(plate.name),
+        "wellName": self.get_ot_name(well.name),
+        "wellLocation": self._well_location(offset or Coordinate.zero()),
+      },
+    )
+    # z_position is absent (not null) when no liquid is found, so read it defensively.
+    return cast(Optional[float], result["result"].get("z_position"))
+
+  async def touch_tip(
+    self, well: Well, radius: float = 1.0, use_channel: int = 0, offset: Optional[Coordinate] = None
+  ) -> None:
+    """Touch the tip to the sides of ``well`` to shed droplets.
+
+    ``radius`` is the fraction of the well radius the tip moves toward (1.0 = the wall).
+    """
+    plate = self._plate_of(well)
+    await self._assign_plate(plate)
+    self._run_command(
+      "touchTip",
+      {
+        "pipetteId": self._pipette_id_for_channel(use_channel),
+        "labwareId": self.get_ot_name(plate.name),
+        "wellName": self.get_ot_name(well.name),
+        "wellLocation": self._well_location(offset or Coordinate.zero()),
+        "radius": radius,
+      },
+    )
 
   # --- pipetting extras exposed on the backend (reach via lh.backend) ---
 

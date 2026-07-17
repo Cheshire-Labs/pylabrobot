@@ -21,6 +21,8 @@ from pylabrobot.liquid_handling.standard import (
 )
 from pylabrobot.resources import Coordinate, Resource, Tip
 from pylabrobot.resources.opentrons import FlexDeck
+from pylabrobot.resources.plate import Plate
+from pylabrobot.resources.well import Well
 from pylabrobot.resources.rotation import Rotation
 
 
@@ -188,6 +190,63 @@ class FlexBackendUnitTests(unittest.TestCase):
     backend.left_pipette = {"pipetteId": "L", "name": "p1000_96"}
     backend.right_pipette = None
     self.assertTrue(backend.head96_installed)
+
+
+class FlexWellReferencingTests(unittest.IsolatedAsyncioTestCase):
+  """touch_tip / liquid_probe load the well's plate on demand, then reference the well."""
+
+  def _backend_and_well(self):
+    backend = _flex_backend()  # left p50, right p1000
+    well = MagicMock(spec=Well)
+    well.name = "plate_A2"
+    plate = MagicMock(spec=Plate)
+    plate.name = "plate"
+    well.parent = plate
+    return backend, well
+
+  async def test_touch_tip_loads_the_plate_and_emits_touch_tip(self):
+    backend, well = self._backend_and_well()
+    with (
+      patch.object(backend, "_assign_plate", new=AsyncMock()) as assign,
+      patch.object(backend, "_run_command") as run,
+    ):
+      await backend.touch_tip(well, radius=0.5, use_channel=1)
+    assign.assert_awaited_once_with(well.parent)
+    command, params = run.call_args.args
+    self.assertEqual(command, "touchTip")
+    self.assertEqual(params["radius"], 0.5)
+    self.assertEqual(params["pipetteId"], "R")
+
+  async def test_try_liquid_probe_returns_none_when_no_liquid(self):
+    backend, well = self._backend_and_well()
+    with (
+      patch.object(backend, "_assign_plate", new=AsyncMock()),
+      patch.object(backend, "_run_command", return_value={"result": {"position": {"z": 3.0}}}),
+    ):
+      self.assertIsNone(await backend.try_liquid_probe(well, use_channel=1))
+
+  async def test_liquid_probe_raises_when_no_liquid(self):
+    backend, well = self._backend_and_well()
+    with (
+      patch.object(backend, "_assign_plate", new=AsyncMock()),
+      patch.object(backend, "_run_command", return_value={"result": {"position": {"z": 3.0}}}),
+    ):
+      with self.assertRaisesRegex(RuntimeError, "no liquid"):
+        await backend.liquid_probe(well, use_channel=1)
+
+  async def test_liquid_probe_returns_z_when_liquid_found(self):
+    backend, well = self._backend_and_well()
+    with (
+      patch.object(backend, "_assign_plate", new=AsyncMock()),
+      patch.object(backend, "_run_command", return_value={"result": {"z_position": 5.5}}),
+    ):
+      self.assertEqual(await backend.liquid_probe(well, use_channel=1), 5.5)
+
+  async def test_well_not_in_a_plate_is_rejected(self):
+    backend, well = self._backend_and_well()
+    well.parent = MagicMock()  # not a Plate
+    with self.assertRaisesRegex(ValueError, "not part of a plate"):
+      await backend.touch_tip(well, use_channel=1)
 
 
 class Flex96PipettingTests(unittest.IsolatedAsyncioTestCase):
