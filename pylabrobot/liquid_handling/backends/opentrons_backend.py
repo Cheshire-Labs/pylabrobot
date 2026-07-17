@@ -136,7 +136,7 @@ class OpentronsBackend(LiquidHandlerBackend):
     self.left_pipette: Optional[Dict[str, str]] = None
     self.right_pipette: Optional[Dict[str, str]] = None
 
-    self.traversal_height = 120  # test
+    self.traversal_height = 120
     self._tip_racks: Dict[str, Union[int, str]] = {}  # tip_rack.name -> slot
     self._plr_name_to_load_name: Dict[str, str] = {}
 

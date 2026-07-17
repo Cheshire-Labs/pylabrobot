@@ -26,8 +26,8 @@ from pylabrobot.resources.well import Well
 # Addressable area exposed by the trashBinAdapter fixture at A3, used for tip disposal.
 _TRASH_ADDRESSABLE_AREA = "movableTrashA3"
 
-# The robot/* command family was added to the robot-server in software 8.3.0.
-_FLEX_ROBOT_COMMANDS_VERSION = "8.3.0"
+# The robot/* command family is available on robot software 8.2.0+ (confirm via GET /health).
+_FLEX_ROBOT_COMMANDS_VERSION = "8.2.0"
 
 FlexMotorAxis = Literal[
   "x",
@@ -226,7 +226,9 @@ class OpentronsFlexBackend(OpentronsBackend):
 
   # --- gripper: PLR's pick/move/drop maps onto Opentrons' atomic moveLabware ---
 
-  def _build_movable_labware_definition(self, resource: Resource) -> dict:
+  def _build_movable_labware_definition(
+    self, resource: Resource, grip_distance_from_top: float
+  ) -> dict:
     name = self.get_ot_name(resource.name)
     size_x = resource.get_absolute_size_x()
     size_y = resource.get_absolute_size_y()
@@ -262,7 +264,9 @@ class OpentronsFlexBackend(OpentronsBackend):
         }
       },
       "groups": [{"wells": ["A1"], "metadata": {"wellBottomShape": "flat"}}],
-      # required for the gripper to pick the labware up
+      # Where the gripper grips, up from the labware bottom. Without it the robot-server grips at
+      # the z-midpoint and ignores the caller's requested pickup_distance_from_top.
+      "gripHeightFromLabwareBottom": max(0.0, size_z - grip_distance_from_top),
       "gripperOffsets": {
         "default": {
           "pickUpOffset": {"x": 0, "y": 0, "z": 0},
@@ -271,8 +275,10 @@ class OpentronsFlexBackend(OpentronsBackend):
       },
     }
 
-  def _define_and_load_movable_labware(self, resource: Resource) -> str:
-    definition = self._build_movable_labware_definition(resource)
+  def _define_and_load_movable_labware(
+    self, resource: Resource, grip_distance_from_top: float
+  ) -> str:
+    definition = self._build_movable_labware_definition(resource, grip_distance_from_top)
     data = self._ot.labware.define(definition)
     namespace, load_name, version = data["data"]["definitionUri"].split("/")
     labware_id = self.get_ot_name(resource.name)
@@ -382,14 +388,16 @@ class OpentronsFlexBackend(OpentronsBackend):
 
   # --- well-referencing commands: load the plate, then reference a well ---
 
-  def _build_plate_definition(self, plate: Plate) -> dict:
+  def _build_plate_definition(
+    self, plate: Plate, grip_distance_from_top: Optional[float] = None
+  ) -> dict:
     """Build a robot-server labware definition from a PLR plate's geometry.
 
     Mirrors the tip-rack definition builder, but for a well plate: wells carry a liquid volume
     and depth rather than a tip length, so touch_tip and liquid_probe get the real well geometry.
     """
     ot_slot_size_y = 86
-    return {
+    definition: dict = {
       "schemaVersion": 2,
       "version": 1,
       "namespace": "pylabrobot",
@@ -438,11 +446,18 @@ class OpentronsFlexBackend(OpentronsBackend):
         }
       ],
     }
+    if grip_distance_from_top is not None:
+      definition["gripHeightFromLabwareBottom"] = max(
+        0.0, plate.get_absolute_size_z() - grip_distance_from_top
+      )
+    return definition
 
-  async def _assign_plate(self, plate: Plate) -> None:
+  async def _assign_plate(
+    self, plate: Plate, grip_distance_from_top: Optional[float] = None
+  ) -> None:
     if plate.name in self._loaded_plates:
       return
-    data = self._ot.labware.define(self._build_plate_definition(plate))
+    data = self._ot.labware.define(self._build_plate_definition(plate, grip_distance_from_top))
     namespace, definition, version = data["data"]["definitionUri"].split("/")
     self._load_labware_at_slot(
       load_name=definition,
@@ -573,6 +588,12 @@ class OpentronsFlexBackend(OpentronsBackend):
     H12), and ``QUADRANT`` additionally needs ``front_right_nozzle`` and ``back_left_nozzle``.
     """
     pipette_id = self._require_96_head()
+    if style != "ALL" and primary_nozzle is None:
+      raise ValueError(f"The {style} nozzle layout requires primary_nozzle.")
+    if style == "QUADRANT" and (front_right_nozzle is None or back_left_nozzle is None):
+      raise ValueError(
+        "The QUADRANT nozzle layout also requires front_right_nozzle and back_left_nozzle."
+      )
     config: dict = {"style": style}
     if primary_nozzle is not None:
       config["primaryNozzle"] = primary_nozzle
@@ -702,10 +723,29 @@ class OpentronsFlexBackend(OpentronsBackend):
     await self._retract_96_head(target, dispense.offset, pipette_id)
 
   async def pick_up_resource(self, pickup: ResourcePickup):
-    resource = pickup.resource
-    if resource.name not in self._loaded_labware:
-      self._loaded_labware[resource.name] = self._define_and_load_movable_labware(resource)
-    self._pending_pickup = (self._loaded_labware[resource.name], resource)
+    labware_id = await self._ensure_movable_labware_loaded(
+      pickup.resource, pickup.pickup_distance_from_top
+    )
+    self._pending_pickup = (labware_id, pickup.resource)
+
+  async def _ensure_movable_labware_loaded(
+    self, resource: Resource, grip_distance_from_top: float
+  ) -> str:
+    """Load a resource for a gripper move, reusing any load a pipetting or well-referencing path
+    already made so nothing is defined twice under one labware id. Plates and tip racks load with
+    their real definition (so they stay pipettable); anything else gets a minimal movable stub."""
+    name = resource.name
+    if name in self._loaded_plates or name in self._tip_racks or name in self._loaded_labware:
+      return self.get_ot_name(name)
+    if isinstance(resource, Plate):
+      await self._assign_plate(resource, grip_distance_from_top)
+    elif isinstance(resource, TipRack):
+      await self._assign_tip_rack(resource, resource.get_item("A1").make_tip())
+    else:
+      self._loaded_labware[name] = self._define_and_load_movable_labware(
+        resource, grip_distance_from_top
+      )
+    return self.get_ot_name(name)
 
   async def move_picked_up_resource(self, move: ResourceMove):
     raise NotImplementedError(

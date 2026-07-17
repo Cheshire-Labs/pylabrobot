@@ -36,7 +36,7 @@ class OpentronsTemperatureModuleV2(TemperatureController, OTModule):
     Args:
       name: Name of the temperature module.
       opentrons_id: Opentrons ID of the temperature module. Get it from
-        `OpentronsBackend(host="x.x.x.x", port=31950).list_connected_modules()`. Exactly one of `opentrons_id` or `serial_port` must be provided.
+        `OpentronsOT2Backend(host="x.x.x.x", port=31950).list_connected_modules()`. Exactly one of `opentrons_id` or `serial_port` must be provided.
       serial_port: Serial port for USB communication. Exactly one of `opentrons_id` or `serial_port` must be provided.
       child: Optional child resource like a tube rack or well plate to use on the
         temperature controller module.

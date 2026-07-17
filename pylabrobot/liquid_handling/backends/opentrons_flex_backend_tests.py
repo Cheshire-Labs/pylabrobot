@@ -22,6 +22,7 @@ from pylabrobot.liquid_handling.standard import (
 from pylabrobot.resources import Coordinate, Resource, Tip
 from pylabrobot.resources.opentrons import FlexDeck
 from pylabrobot.resources.plate import Plate
+from pylabrobot.resources.tip_rack import TipRack
 from pylabrobot.resources.well import Well
 from pylabrobot.resources.rotation import Rotation
 
@@ -33,6 +34,7 @@ def _flex_backend() -> OpentronsFlexBackend:
   backend._plr_name_to_load_name = {}
   backend._tip_racks = {}
   backend._loaded_labware = {}
+  backend._loaded_plates = set()
   backend._pending_pickup = None
   backend.left_pipette = {"pipetteId": "L", "name": "p50_single_flex"}
   backend.right_pipette = {"pipetteId": "R", "name": "p1000_single_flex"}
@@ -127,14 +129,14 @@ class FlexRobotCommandTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "2.0"):
           await self.backend.close_gripper_jaw(force=force)
 
-  async def test_robot_commands_require_8_3_0(self):
-    self.backend.ot_api_version = "8.2.0"
+  async def test_robot_commands_rejected_below_the_minimum_version(self):
+    self.backend.ot_api_version = "8.1.0"
     with self.assertRaisesRegex(RuntimeError, _FLEX_ROBOT_COMMANDS_VERSION):
       await self.backend.move_axes_to({"x": 1.0})
     self.run_command.assert_not_called()
 
   async def test_robot_commands_allowed_on_a_double_digit_major(self):
-    """Version gating must compare numerically: "10.0.0" is newer than "8.3.0", but sorts
+    """Version gating must compare numerically: "10.0.0" is newer than "8.2.0", but sorts
     before it as a string."""
     self.backend.ot_api_version = "10.0.0"
     await self.backend.move_axes_to({"x": 1.0})
@@ -314,6 +316,16 @@ class Flex96PipettingTests(unittest.IsolatedAsyncioTestCase):
     _, params = run.call_args.args
     self.assertEqual(params["configurationParams"], {"style": "COLUMN", "primaryNozzle": "A1"})
 
+  async def test_configure_nozzle_layout_column_without_primary_nozzle_is_rejected(self):
+    backend = self._backend_with_96()
+    with self.assertRaisesRegex(ValueError, "primary_nozzle"):
+      await backend.configure_nozzle_layout("COLUMN")
+
+  async def test_configure_nozzle_layout_quadrant_requires_the_corner_nozzles(self):
+    backend = self._backend_with_96()
+    with self.assertRaisesRegex(ValueError, "front_right_nozzle"):
+      await backend.configure_nozzle_layout("QUADRANT", primary_nozzle="A1")
+
   def test_pipette_table_has_no_bogus_200ul_entries(self):
     # the Flex ships no 200uL pipette; 96-channel is 1000uL only
     table = OpentronsFlexBackend.pipette_name2volume
@@ -463,6 +475,69 @@ class FlexGripperTests(unittest.IsolatedAsyncioTestCase):
     # the pickup is buffered until the drop (Opentrons moveLabware is atomic)
     assert backend._pending_pickup is not None
     self.assertEqual(backend._pending_pickup[0], backend._loaded_labware["myplate"])
+
+  async def test_movable_stub_grip_height_honors_pickup_distance(self):
+    backend = _flex_backend()
+    deck = FlexDeck()
+    backend.set_deck(deck)
+    lid = Resource(name="lid", size_x=127.0, size_y=85.0, size_z=14.0)
+    deck.assign_child_at_slot(lid, "C2")
+    backend._ot = MagicMock()
+    backend._ot.labware.define.return_value = {"data": {"definitionUri": "pylabrobot/abc/1"}}
+    backend._run_command = MagicMock(return_value={})
+
+    await backend.pick_up_resource(
+      ResourcePickup(
+        resource=lid,
+        offset=Coordinate.zero(),
+        pickup_distance_from_top=4.0,
+        direction=GripDirection.FRONT,
+      )
+    )
+
+    definition = backend._ot.labware.define.call_args[0][0]
+    # 14 mm tall, gripped 4 mm below the top -> 10 mm up from the bottom (not the 7 mm midpoint)
+    self.assertEqual(definition["gripHeightFromLabwareBottom"], 10.0)
+
+  async def test_gripper_loads_a_plate_with_its_rich_definition_not_a_stub(self):
+    backend = _flex_backend()
+    plate = MagicMock(spec=Plate)
+    plate.name = "fresh_plate"
+    with (
+      patch.object(backend, "_assign_plate", new=AsyncMock()) as assign,
+      patch.object(backend, "_define_and_load_movable_labware") as stub,
+    ):
+      await backend._ensure_movable_labware_loaded(plate, grip_distance_from_top=3.0)
+    assign.assert_awaited_once_with(plate, 3.0)  # rich, pipettable def; grip distance threaded
+    stub.assert_not_called()  # never the wells-less stub
+
+  async def test_gripper_loads_a_tip_rack_with_its_rich_definition(self):
+    backend = _flex_backend()
+    rack = MagicMock(spec=TipRack)
+    rack.name = "fresh_rack"
+    rack.get_item.return_value.make_tip.return_value = _tip(300)
+    with (
+      patch.object(backend, "_assign_tip_rack", new=AsyncMock()) as assign,
+      patch.object(backend, "_define_and_load_movable_labware") as stub,
+    ):
+      await backend._ensure_movable_labware_loaded(rack, grip_distance_from_top=3.0)
+    assign.assert_awaited_once()
+    stub.assert_not_called()
+
+  async def test_gripper_reuses_a_plate_already_loaded_for_pipetting(self):
+    """A plate pipetted/touched and then gripper-moved must not be defined twice under one id."""
+    backend = _flex_backend()
+    plate = MagicMock(spec=Plate)
+    plate.name = "shared_plate"
+    backend._loaded_plates.add("shared_plate")  # the well-referencing path already loaded it
+    with (
+      patch.object(backend, "_assign_plate", new=AsyncMock()) as assign,
+      patch.object(backend, "_define_and_load_movable_labware") as stub,
+    ):
+      labware_id = await backend._ensure_movable_labware_loaded(plate, grip_distance_from_top=2.0)
+    assign.assert_not_awaited()
+    stub.assert_not_called()
+    self.assertEqual(labware_id, backend.get_ot_name("shared_plate"))
 
   async def test_gripper_drop_emits_move_labware_using_gripper(self):
     backend = _flex_backend()
