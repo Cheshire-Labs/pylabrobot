@@ -374,6 +374,17 @@ class OpentronsFlexBackend(OpentronsBackend):
       params["force"] = force
     self._run_command("robot/closeGripperJaw", params)
 
+  # --- pipetting extras exposed on the backend (reach via lh.backend) ---
+
+  async def blow_out_in_place(self, flow_rate: float, use_channel: int = 0) -> None:
+    """Blow out at the current position, clearing residual liquid from the tip.
+
+    ``flow_rate`` is in uL/s. ``use_channel`` selects the mount (0 = left, which is also the
+    96-head); it resolves through the same channel map as the pipetting commands.
+    """
+    pipette_id = self._pipette_id_for_channel(use_channel)
+    self._run_command("blowOutInPlace", {"pipetteId": pipette_id, "flowRate": flow_rate})
+
   # --- 96-channel head pipetting (valid only when a 96 head is mounted) ---
 
   async def configure_nozzle_layout(

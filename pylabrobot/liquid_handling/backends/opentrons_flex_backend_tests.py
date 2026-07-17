@@ -217,6 +217,14 @@ class Flex96PipettingTests(unittest.IsolatedAsyncioTestCase):
     container_op.container = container
     self.assertIs(backend._ninety_six_target(container_op), container)
 
+  async def test_blow_out_in_place_uses_the_selected_channel(self):
+    backend = self._backend_with_96()
+    with patch.object(backend, "_run_command") as run:
+      await backend.blow_out_in_place(flow_rate=50.0)
+    command, params = run.call_args.args
+    self.assertEqual(command, "blowOutInPlace")
+    self.assertEqual(params, {"pipetteId": "96id", "flowRate": 50.0})
+
   async def test_configure_nozzle_layout_all_sends_just_the_style(self):
     backend = self._backend_with_96()
     with patch.object(backend, "_run_command") as run:
