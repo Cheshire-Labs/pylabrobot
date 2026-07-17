@@ -102,12 +102,8 @@ class OpentronsFlexBackend(OpentronsBackend):
     self._pending_pickup = None
     if self._has_96_head:
       # A 96-channel head must be told its nozzle layout before it will pipette; ALL selects the
-      # full head. Partial-column work re-configures via configure_nozzle_layout.
-      assert self.left_pipette is not None
-      self._run_command(
-        "configureNozzleLayout",
-        {"pipetteId": self.left_pipette["pipetteId"], "configurationParams": {"style": "ALL"}},
-      )
+      # full head. Callers re-configure for partial-column work via configure_nozzle_layout.
+      await self.configure_nozzle_layout("ALL")
 
   @property
   def _has_96_head(self) -> bool:
@@ -379,6 +375,31 @@ class OpentronsFlexBackend(OpentronsBackend):
     self._run_command("robot/closeGripperJaw", params)
 
   # --- 96-channel head pipetting (valid only when a 96 head is mounted) ---
+
+  async def configure_nozzle_layout(
+    self,
+    style: Literal["ALL", "SINGLE", "ROW", "COLUMN", "QUADRANT"] = "ALL",
+    primary_nozzle: Optional[str] = None,
+    front_right_nozzle: Optional[str] = None,
+    back_left_nozzle: Optional[str] = None,
+  ) -> None:
+    """Select which nozzles of the 96-head are active.
+
+    ``ALL`` uses the whole head. ``SINGLE``/``ROW``/``COLUMN``/``QUADRANT`` select a subset for
+    partial pickup and pipetting; ``primary_nozzle`` is the anchor corner (one of A1, H1, A12,
+    H12), and ``QUADRANT`` additionally needs ``front_right_nozzle`` and ``back_left_nozzle``.
+    """
+    pipette_id = self._require_96_head()
+    config: dict = {"style": style}
+    if primary_nozzle is not None:
+      config["primaryNozzle"] = primary_nozzle
+    if front_right_nozzle is not None:
+      config["frontRightNozzle"] = front_right_nozzle
+    if back_left_nozzle is not None:
+      config["backLeftNozzle"] = back_left_nozzle
+    self._run_command(
+      "configureNozzleLayout", {"pipetteId": pipette_id, "configurationParams": config}
+    )
 
   def _require_96_head(self) -> str:
     if not self._has_96_head:

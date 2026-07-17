@@ -217,6 +217,20 @@ class Flex96PipettingTests(unittest.IsolatedAsyncioTestCase):
     container_op.container = container
     self.assertIs(backend._ninety_six_target(container_op), container)
 
+  async def test_configure_nozzle_layout_all_sends_just_the_style(self):
+    backend = self._backend_with_96()
+    with patch.object(backend, "_run_command") as run:
+      await backend.configure_nozzle_layout("ALL")
+    _, params = run.call_args.args
+    self.assertEqual(params["configurationParams"], {"style": "ALL"})
+
+  async def test_configure_nozzle_layout_column_includes_primary_nozzle(self):
+    backend = self._backend_with_96()
+    with patch.object(backend, "_run_command") as run:
+      await backend.configure_nozzle_layout("COLUMN", primary_nozzle="A1")
+    _, params = run.call_args.args
+    self.assertEqual(params["configurationParams"], {"style": "COLUMN", "primaryNozzle": "A1"})
+
   def test_pipette_table_has_no_bogus_200ul_entries(self):
     # the Flex ships no 200uL pipette; 96-channel is 1000uL only
     table = OpentronsFlexBackend.pipette_name2volume
