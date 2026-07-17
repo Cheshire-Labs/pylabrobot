@@ -50,6 +50,13 @@ _FLEX_MOTOR_AXES = frozenset(
 _FLEX_GRIPPER_MIN_FORCE = 2.0
 _FLEX_GRIPPER_MAX_FORCE = 30.0
 
+_NINETY_SIX_CHANNEL_COUNT = 96
+
+
+def _is_96_channel(pipette_name: str) -> bool:
+  """Whether a reported pipette name denotes a 96-channel head (e.g. p1000_96, p200_96)."""
+  return "96" in pipette_name
+
 
 class OpentronsFlexBackend(OpentronsBackend):
   """Backend for the Opentrons Flex (OT-3) liquid handling robot.
@@ -62,12 +69,13 @@ class OpentronsFlexBackend(OpentronsBackend):
   _num_arms = 1  # the Flex gripper
 
   pipette_name2volume = {
-    # names the robot reports for attached pipettes (GET /pipettes)
+    # names the robot reports for attached pipettes (GET /pipettes). The 96-channel reports
+    # "p1000_96" / "p200_96" (no _flex suffix), unlike the single/multi pipettes.
     "p50_single_flex": 50,
     "p50_multi_flex": 50,
     "p1000_single_flex": 1000,
     "p1000_multi_flex": 1000,
-    "p1000_96_flex": 1000,
+    "p1000_96": 1000,
     # loadPipette names
     "flex_1channel_50": 50,
     "flex_8channel_50": 50,
@@ -85,6 +93,26 @@ class OpentronsFlexBackend(OpentronsBackend):
     await super().setup(skip_home=skip_home)
     self._loaded_labware = {}
     self._pending_pickup = None
+    if self._has_96_head:
+      # A 96-channel head must be told its nozzle layout before it will pipette; ALL selects the
+      # full head. Partial-column work re-configures via configure_nozzle_layout.
+      assert self.left_pipette is not None
+      self._run_command(
+        "configureNozzleLayout",
+        {"pipetteId": self.left_pipette["pipetteId"], "configurationParams": {"style": "ALL"}},
+      )
+
+  @property
+  def _has_96_head(self) -> bool:
+    """Whether a 96-channel head is mounted. It is mutually exclusive with hand pipettes and,
+    on the Flex, always reports on the left mount."""
+    return self.left_pipette is not None and _is_96_channel(self.left_pipette["name"])
+
+  @property
+  def num_channels(self) -> int:
+    if self._has_96_head:
+      return _NINETY_SIX_CHANNEL_COUNT
+    return super().num_channels
 
   async def stop(self):
     await super().stop()

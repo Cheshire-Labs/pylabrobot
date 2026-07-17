@@ -163,6 +163,23 @@ class FlexBackendUnitTests(unittest.TestCase):
     self.assertEqual(backend.pipette_name2volume["p50_single_flex"], 50)
     self.assertEqual(backend.pipette_name2volume["flex_1channel_1000"], 1000)
 
+  def test_reported_96_channel_name_is_in_the_volume_table(self):
+    # GET /pipettes reports the 96-channel as "p1000_96", not "p1000_96_flex"; the volume
+    # lookup during setup KeyErrors if it is missing.
+    self.assertEqual(OpentronsFlexBackend.pipette_name2volume["p1000_96"], 1000)
+
+  def test_two_hand_pipettes_report_two_channels(self):
+    backend = _flex_backend()  # left p50, right p1000
+    self.assertFalse(backend._has_96_head)
+    self.assertEqual(backend.num_channels, 2)
+
+  def test_96_head_reports_96_channels(self):
+    backend = _flex_backend()
+    backend.left_pipette = {"pipetteId": "L", "name": "p1000_96"}
+    backend.right_pipette = None
+    self.assertTrue(backend._has_96_head)
+    self.assertEqual(backend.num_channels, 96)
+
   def test_pipette_table_has_no_bogus_200ul_entries(self):
     # the Flex ships no 200uL pipette; 96-channel is 1000uL only
     table = OpentronsFlexBackend.pipette_name2volume
