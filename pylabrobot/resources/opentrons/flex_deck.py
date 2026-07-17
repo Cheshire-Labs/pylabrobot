@@ -87,6 +87,10 @@ class FlexDeck(Deck):
     trash = Trash(name="trash", size_x=_SLOT_SIZE_X, size_y=_SLOT_SIZE_Y, size_z=_TRASH_SIZE_Z)
     self.assign_child_at_slot(trash, _TRASH_SLOT)
 
+  def get_trash_area96(self) -> Trash:
+    # The Flex has one movable trash bin; the 96 head discards into the same bin as hand pipettes.
+    return self.get_trash_area()
+
   def assign_child_resource(
     self,
     resource: Resource,

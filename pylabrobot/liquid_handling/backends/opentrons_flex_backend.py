@@ -5,12 +5,19 @@ from pylabrobot.liquid_handling.backends.opentrons_backend import (
   _version_tuple,
 )
 from pylabrobot.liquid_handling.standard import (
+  DropTipRack,
+  MultiHeadAspirationContainer,
+  MultiHeadAspirationPlate,
+  MultiHeadDispenseContainer,
+  MultiHeadDispensePlate,
+  PickupTipRack,
   ResourceDrop,
   ResourceMove,
   ResourcePickup,
 )
 from pylabrobot.resources import Coordinate, Resource
 from pylabrobot.resources.opentrons import FlexDeck
+from pylabrobot.resources.tip_rack import TipRack
 from pylabrobot.resources.trash import Trash
 
 # Addressable area exposed by the trashBinAdapter fixture at A3, used for tip disposal.
@@ -113,6 +120,10 @@ class OpentronsFlexBackend(OpentronsBackend):
     if self._has_96_head:
       return _NINETY_SIX_CHANNEL_COUNT
     return super().num_channels
+
+  @property
+  def head96_installed(self) -> Optional[bool]:
+    return self._has_96_head
 
   async def stop(self):
     await super().stop()
@@ -366,6 +377,125 @@ class OpentronsFlexBackend(OpentronsBackend):
         )
       params["force"] = force
     self._run_command("robot/closeGripperJaw", params)
+
+  # --- 96-channel head pipetting (valid only when a 96 head is mounted) ---
+
+  def _require_96_head(self) -> str:
+    if not self._has_96_head:
+      raise RuntimeError("The *96 operations require a 96-channel head, which is not mounted.")
+    assert self.left_pipette is not None
+    return self.left_pipette["pipetteId"]
+
+  async def pick_up_tips96(self, pickup: PickupTipRack):
+    """Pick up a full rack of tips with the 96-channel head.
+
+    With the ALL nozzle layout the head references the rack's A1 well and engages all 96 tips.
+    """
+    pipette_id = self._require_96_head()
+    tip_rack = pickup.resource
+    tip = next((t for t in pickup.tips if t is not None), None)
+    if tip is None:
+      raise ValueError("pick_up_tips96 needs at least one tip in the rack.")
+    if tip_rack.name not in self._tip_racks:
+      await self._assign_tip_rack(tip_rack, tip)
+    a1 = tip_rack.get_item("A1")
+    self._ot.lh.pick_up_tip(
+      labware_id=self.get_ot_name(tip_rack.name),
+      well_name=self.get_ot_name(a1.name),
+      pipette_id=pipette_id,
+      offset_x=pickup.offset.x,
+      offset_y=pickup.offset.y,
+      offset_z=pickup.offset.z + tip.total_tip_length,
+    )
+    self._set_tip_state(pipette_id, True)
+
+  async def drop_tips96(self, drop: DropTipRack):
+    """Drop the 96-head tips into the trash, or back into a rack that is already loaded."""
+    pipette_id = self._require_96_head()
+    offset_z = drop.offset.z + 10  # matches the single-channel drop's smoothing offset
+    resource = drop.resource
+    if isinstance(resource, TipRack) and not self._resource_is_trash(resource):
+      if resource.name not in self._tip_racks:
+        raise RuntimeError(
+          f"Cannot drop 96 tips into rack {resource.name!r}: it is not loaded on the robot."
+        )
+      a1 = resource.get_item("A1")
+      self._ot.lh.drop_tip(
+        self.get_ot_name(resource.name),
+        well_name=self.get_ot_name(a1.name),
+        pipette_id=pipette_id,
+        offset_x=drop.offset.x,
+        offset_y=drop.offset.y,
+        offset_z=offset_z,
+      )
+    else:
+      self._drop_tip_in_trash(pipette_id, drop.offset.x, drop.offset.y, offset_z)
+    self._set_tip_state(pipette_id, False)
+
+  def _ninety_six_target(
+    self,
+    op: Union[
+      MultiHeadAspirationPlate,
+      MultiHeadAspirationContainer,
+      MultiHeadDispensePlate,
+      MultiHeadDispenseContainer,
+    ],
+  ) -> Resource:
+    """The resource the head references. For a plate the head aligns nozzle A1 to well A1."""
+    if isinstance(op, (MultiHeadAspirationPlate, MultiHeadDispensePlate)):
+      return op.wells[0]
+    return op.container
+
+  async def _move_96_head_over(
+    self, target: Resource, offset: Coordinate, liquid_height: float, pipette_id: str
+  ) -> None:
+    location = self._deck_to_robot_frame(
+      target.get_location_wrt(self.deck, "c", "c", "cavity_bottom")
+      + offset
+      + Coordinate(z=liquid_height)
+    )
+    await self.move_pipette_head(
+      location=location, minimum_z_height=self.traversal_height, pipette_id=pipette_id
+    )
+
+  async def _retract_96_head(self, target: Resource, offset: Coordinate, pipette_id: str) -> None:
+    up = self._deck_to_robot_frame(
+      target.get_location_wrt(self.deck, "c", "c", "cavity_bottom") + offset
+    )
+    up.z = self.traversal_height
+    await self.move_pipette_head(
+      location=up, minimum_z_height=self.traversal_height, pipette_id=pipette_id
+    )
+
+  async def aspirate96(
+    self, aspiration: Union[MultiHeadAspirationPlate, MultiHeadAspirationContainer]
+  ):
+    """Aspirate from a whole plate (or reservoir) with the 96-channel head."""
+    pipette_id = self._require_96_head()
+    target = self._ninety_six_target(aspiration)
+    flow_rate = aspiration.flow_rate or self._get_default_aspiration_flow_rate(
+      self.get_pipette_name(pipette_id)
+    )
+    await self._move_96_head_over(
+      target, aspiration.offset, aspiration.liquid_height or 0, pipette_id
+    )
+    self._ot.lh.aspirate_in_place(
+      volume=aspiration.volume, flow_rate=flow_rate, pipette_id=pipette_id
+    )
+    await self._retract_96_head(target, aspiration.offset, pipette_id)
+
+  async def dispense96(self, dispense: Union[MultiHeadDispensePlate, MultiHeadDispenseContainer]):
+    """Dispense to a whole plate (or reservoir) with the 96-channel head."""
+    pipette_id = self._require_96_head()
+    target = self._ninety_six_target(dispense)
+    flow_rate = dispense.flow_rate or self._get_default_dispense_flow_rate(
+      self.get_pipette_name(pipette_id)
+    )
+    await self._move_96_head_over(target, dispense.offset, dispense.liquid_height or 0, pipette_id)
+    self._ot.lh.dispense_in_place(
+      volume=dispense.volume, flow_rate=flow_rate, pipette_id=pipette_id
+    )
+    await self._retract_96_head(target, dispense.offset, pipette_id)
 
   async def pick_up_resource(self, pickup: ResourcePickup):
     resource = pickup.resource

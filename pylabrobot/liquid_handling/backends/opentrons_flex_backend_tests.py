@@ -11,6 +11,8 @@ from pylabrobot.liquid_handling.backends.opentrons_flex_backend import (
 )
 from pylabrobot.liquid_handling.standard import (
   GripDirection,
+  MultiHeadAspirationContainer,
+  MultiHeadAspirationPlate,
   ResourceDrop,
   ResourceMove,
   ResourcePickup,
@@ -179,6 +181,41 @@ class FlexBackendUnitTests(unittest.TestCase):
     backend.right_pipette = None
     self.assertTrue(backend._has_96_head)
     self.assertEqual(backend.num_channels, 96)
+
+  def test_96_head_advertises_head96_installed(self):
+    backend = _flex_backend()
+    self.assertFalse(backend.head96_installed)  # two hand pipettes
+    backend.left_pipette = {"pipetteId": "L", "name": "p1000_96"}
+    backend.right_pipette = None
+    self.assertTrue(backend.head96_installed)
+
+
+class Flex96PipettingTests(unittest.IsolatedAsyncioTestCase):
+  def _backend_with_96(self):
+    backend = _flex_backend()
+    backend.left_pipette = {"pipetteId": "96id", "name": "p1000_96"}
+    backend.right_pipette = None
+    return backend
+
+  async def test_96_ops_require_a_96_head(self):
+    """The *96 methods refuse to run without a 96 head rather than mis-drive a hand pipette."""
+    backend = _flex_backend()  # two hand pipettes, no 96
+    with self.assertRaisesRegex(RuntimeError, "96-channel head"):
+      backend._require_96_head()
+
+  def test_ninety_six_target_is_a1_for_a_plate(self):
+    backend = self._backend_with_96()
+    a1, h12 = MagicMock(), MagicMock()
+    plate_op = MagicMock(spec=MultiHeadAspirationPlate)
+    plate_op.wells = [a1, h12]
+    self.assertIs(backend._ninety_six_target(plate_op), a1)
+
+  def test_ninety_six_target_is_the_container_for_a_reservoir(self):
+    backend = self._backend_with_96()
+    container = MagicMock()
+    container_op = MagicMock(spec=MultiHeadAspirationContainer)
+    container_op.container = container
+    self.assertIs(backend._ninety_six_target(container_op), container)
 
   def test_pipette_table_has_no_bogus_200ul_entries(self):
     # the Flex ships no 200uL pipette; 96-channel is 1000uL only

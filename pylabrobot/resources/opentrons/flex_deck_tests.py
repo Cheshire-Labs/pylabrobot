@@ -17,6 +17,12 @@ class FlexDeckTests(unittest.TestCase):
     deck = FlexDeck(with_trash=False)
     self.assertIsNone(deck.slots["A3"])
 
+  def test_trash_area_96_is_the_same_movable_bin(self):
+    # The 96 head discards into the one movable trash bin, so the frontend's discard_tips96
+    # path (which asks the deck for a 96 trash area) resolves to the same trash.
+    deck = FlexDeck()
+    self.assertIs(deck.get_trash_area96(), deck.get_trash_area())
+
   def test_d1_is_the_robot_origin(self):
     deck = FlexDeck()
     self.assertEqual(deck.slot_locations["D1"], Coordinate(0.0, 0.0, 0.0))
