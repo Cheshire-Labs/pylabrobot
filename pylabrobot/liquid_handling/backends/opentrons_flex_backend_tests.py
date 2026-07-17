@@ -6,6 +6,9 @@ import pytest
 pytest.importorskip("ot_api")
 
 from pylabrobot.liquid_handling.backends import OpentronsFlexBackend
+from pylabrobot.liquid_handling.backends.opentrons_flex_backend import (
+  _FLEX_ROBOT_COMMANDS_VERSION,
+)
 from pylabrobot.liquid_handling.standard import (
   GripDirection,
   ResourceDrop,
@@ -41,9 +44,107 @@ def _tip(volume: float) -> Tip:
   )
 
 
+class FlexRobotCommandTests(unittest.IsolatedAsyncioTestCase):
+  """The robot/* family: free-space axis motion and direct gripper jaw control.
+
+  These are Flex-only. The robot-server runs an OT-3 hardware check on the axis commands and
+  rejects them on an OT-2.
+  """
+
+  def setUp(self):
+    self.backend = _flex_backend()
+    self.backend.ot_api_version = _FLEX_ROBOT_COMMANDS_VERSION
+    patcher = patch.object(
+      self.backend, "_run_command", return_value={"result": {"position": {"extensionZ": 100.0}}}
+    )
+    self.run_command = patcher.start()
+    self.addCleanup(patcher.stop)
+
+  def _sent(self):
+    command, params = self.run_command.call_args.args
+    return command, params
+
+  async def test_move_axes_to_sends_the_axis_map_verbatim(self):
+    """The robot/ family takes snake_case params, unlike every other command on this API."""
+    await self.backend.move_axes_to({"x": 10.0, "extensionZ": 100.0})
+    command, params = self._sent()
+    self.assertEqual(command, "robot/moveAxesTo")
+    self.assertEqual(params, {"axis_map": {"x": 10.0, "extensionZ": 100.0}})
+
+  async def test_move_axes_to_returns_the_reported_position(self):
+    position = await self.backend.move_axes_to({"extensionZ": 100.0})
+    self.assertEqual(position, {"extensionZ": 100.0})
+
+  async def test_move_axes_to_omits_unset_optional_params(self):
+    """An absent critical_point/speed must not be sent as null; the server defaults them."""
+    await self.backend.move_axes_to({"x": 1.0})
+    _, params = self._sent()
+    self.assertNotIn("critical_point", params)
+    self.assertNotIn("speed", params)
+
+  async def test_move_axes_to_passes_critical_point_and_speed(self):
+    await self.backend.move_axes_to({"x": 1.0}, critical_point={"x": 0.0}, speed=50.0)
+    _, params = self._sent()
+    self.assertEqual(params["critical_point"], {"x": 0.0})
+    self.assertEqual(params["speed"], 50.0)
+
+  async def test_move_axes_relative_sends_deltas(self):
+    await self.backend.move_axes_relative({"extensionZ": -5.0})
+    command, params = self._sent()
+    self.assertEqual(command, "robot/moveAxesRelative")
+    self.assertEqual(params, {"axis_map": {"extensionZ": -5.0}})
+
+  async def test_move_axes_rejects_unknown_axis(self):
+    """A typo'd axis would 422 at the server; fail early with the valid names instead."""
+    with self.assertRaisesRegex(ValueError, "extensionZ"):
+      await self.backend.move_axes_to({"gripperZ": 10.0})
+
+  async def test_open_gripper_jaw(self):
+    await self.backend.open_gripper_jaw()
+    command, params = self._sent()
+    self.assertEqual(command, "robot/openGripperJaw")
+    self.assertEqual(params, {})
+
+  async def test_close_gripper_jaw_sends_force(self):
+    await self.backend.close_gripper_jaw(force=15.0)
+    command, params = self._sent()
+    self.assertEqual(command, "robot/closeGripperJaw")
+    self.assertEqual(params, {"force": 15.0})
+
+  async def test_close_gripper_jaw_omits_force_when_unset(self):
+    """Without a force the robot applies its own default, so send no key at all."""
+    await self.backend.close_gripper_jaw()
+    _, params = self._sent()
+    self.assertEqual(params, {})
+
+  async def test_close_gripper_jaw_rejects_force_outside_the_gripper_range(self):
+    for force in (1.0, 31.0):
+      with self.subTest(force=force):
+        with self.assertRaisesRegex(ValueError, "2.0"):
+          await self.backend.close_gripper_jaw(force=force)
+
+  async def test_robot_commands_require_8_3_0(self):
+    self.backend.ot_api_version = "8.2.0"
+    with self.assertRaisesRegex(RuntimeError, _FLEX_ROBOT_COMMANDS_VERSION):
+      await self.backend.move_axes_to({"x": 1.0})
+    self.run_command.assert_not_called()
+
+  async def test_robot_commands_allowed_on_a_double_digit_major(self):
+    """Version gating must compare numerically: "10.0.0" is newer than "8.3.0", but sorts
+    before it as a string."""
+    self.backend.ot_api_version = "10.0.0"
+    await self.backend.move_axes_to({"x": 1.0})
+    self.run_command.assert_called_once()
+
+
 class FlexBackendUnitTests(unittest.TestCase):
   def test_has_one_arm_for_the_gripper(self):
     self.assertEqual(OpentronsFlexBackend._num_arms, 1)
+
+  def test_robot_frame_conversion_round_trips(self):
+    location = Coordinate(10, 20, 30)
+    backend = _flex_backend()
+    self.assertEqual(backend._robot_to_deck_frame(backend._deck_to_robot_frame(location)), location)
 
   def test_deck_frame_is_the_robot_frame(self):
     location = Coordinate(10, 20, 30)

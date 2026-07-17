@@ -1,6 +1,9 @@
-from typing import Dict, List, Optional, Tuple, Union, cast
+from typing import Dict, List, Literal, Optional, Tuple, Union, cast
 
-from pylabrobot.liquid_handling.backends.opentrons_backend import OpentronsBackend
+from pylabrobot.liquid_handling.backends.opentrons_backend import (
+  OpentronsBackend,
+  _version_tuple,
+)
 from pylabrobot.liquid_handling.standard import (
   ResourceDrop,
   ResourceMove,
@@ -12,6 +15,40 @@ from pylabrobot.resources.trash import Trash
 
 # Addressable area exposed by the trashBinAdapter fixture at A3, used for tip disposal.
 _TRASH_ADDRESSABLE_AREA = "movableTrashA3"
+
+# The robot/* command family was added to the robot-server in software 8.3.0.
+_FLEX_ROBOT_COMMANDS_VERSION = "8.3.0"
+
+FlexMotorAxis = Literal[
+  "x",
+  "y",
+  "leftZ",
+  "rightZ",
+  "leftPlunger",
+  "rightPlunger",
+  "extensionZ",
+  "extensionJaw",
+  "axis96ChannelCam",
+]
+"""Motor axes the robot/* commands address. `extensionZ` and `extensionJaw` are the gripper."""
+
+_FLEX_MOTOR_AXES = frozenset(
+  {
+    "x",
+    "y",
+    "leftZ",
+    "rightZ",
+    "leftPlunger",
+    "rightPlunger",
+    "extensionZ",
+    "extensionJaw",
+    "axis96ChannelCam",
+  }
+)
+
+# Grip force limits from shared-data/gripper/definitions/1/gripperV1.3.json.
+_FLEX_GRIPPER_MIN_FORCE = 2.0
+_FLEX_GRIPPER_MAX_FORCE = 30.0
 
 
 class OpentronsFlexBackend(OpentronsBackend):
@@ -207,6 +244,96 @@ class OpentronsFlexBackend(OpentronsBackend):
       display_name=self.get_ot_name(resource.name),
     )
     return labware_id
+
+  # --- robot/*: free-space axis motion and direct gripper control (Flex only) ---
+
+  def _require_robot_commands(self, command: str) -> None:
+    version = self.ot_api_version
+    if version is None:
+      raise RuntimeError(f"{command} requires setup() to have run, to read the robot's version.")
+    if _version_tuple(version) < _version_tuple(_FLEX_ROBOT_COMMANDS_VERSION):
+      raise RuntimeError(
+        f"{command} requires Opentrons robot software {_FLEX_ROBOT_COMMANDS_VERSION} or newer, "
+        f"but this robot reports {version}."
+      )
+
+  def _check_axes(self, axis_map: Dict[str, float]) -> None:
+    unknown = sorted(set(axis_map) - _FLEX_MOTOR_AXES)
+    if unknown:
+      raise ValueError(f"Unknown motor axes {unknown}. Valid axes: {sorted(_FLEX_MOTOR_AXES)}.")
+
+  def _move_axes(
+    self,
+    command: str,
+    axis_map: Dict[str, float],
+    critical_point: Optional[Dict[str, float]] = None,
+    speed: Optional[float] = None,
+  ) -> Dict[str, float]:
+    self._require_robot_commands(command)
+    self._check_axes(axis_map)
+    # The robot/* commands take snake_case params, unlike the rest of this API.
+    params: dict = {"axis_map": axis_map}
+    if critical_point is not None:
+      params["critical_point"] = critical_point
+    if speed is not None:
+      params["speed"] = speed
+    result = self._run_command(command, params)
+    return cast(Dict[str, float], result["result"]["position"])
+
+  async def move_axes_to(
+    self,
+    axis_map: Dict[str, float],
+    critical_point: Optional[Dict[str, float]] = None,
+    speed: Optional[float] = None,
+  ) -> Dict[str, float]:
+    """Move the named axes to absolute positions, in mm. Axes not named are held.
+
+    Args:
+      axis_map: Target position per axis, keyed by `FlexMotorAxis`.
+      critical_point: The point on the mounted tool the target refers to.
+      speed: Travel speed in mm/s.
+
+    Returns:
+      The position of every axis after the move.
+    """
+
+    return self._move_axes("robot/moveAxesTo", axis_map, critical_point, speed)
+
+  async def move_axes_relative(
+    self, axis_map: Dict[str, float], speed: Optional[float] = None
+  ) -> Dict[str, float]:
+    """Move the named axes by a signed delta, in mm. Axes not named are held.
+
+    Returns:
+      The position of every axis after the move.
+    """
+
+    return self._move_axes("robot/moveAxesRelative", axis_map, speed=speed)
+
+  async def open_gripper_jaw(self) -> None:
+    """Open the gripper jaw, homing it."""
+
+    self._require_robot_commands("robot/openGripperJaw")
+    self._run_command("robot/openGripperJaw", {})
+
+  async def close_gripper_jaw(self, force: Optional[float] = None) -> None:
+    """Close the gripper jaw.
+
+    Args:
+      force: Grip force in Newtons. The robot applies its own default when this is None. There is
+        no jaw-width parameter; drive the `extensionJaw` axis to command a width.
+    """
+
+    self._require_robot_commands("robot/closeGripperJaw")
+    params: dict = {}
+    if force is not None:
+      if not _FLEX_GRIPPER_MIN_FORCE <= force <= _FLEX_GRIPPER_MAX_FORCE:
+        raise ValueError(
+          f"Grip force must be between {_FLEX_GRIPPER_MIN_FORCE} and {_FLEX_GRIPPER_MAX_FORCE} "
+          f"Newtons, got {force}."
+        )
+      params["force"] = force
+    self._run_command("robot/closeGripperJaw", params)
 
   async def pick_up_resource(self, pickup: ResourcePickup):
     resource = pickup.resource

@@ -50,6 +50,26 @@ _OT_DECK_IS_ADDRESSABLE_AREA_VERSION = "7.1.0"
 logger = logging.getLogger(__name__)
 
 
+def _version_tuple(version: str) -> Tuple[int, ...]:
+  """Parse a dotted robot-software version into comparable integers.
+
+  Comparing these as strings puts "10.0.0" below "7.1.0", so any version gate has to compare
+  numerically. A pre-release suffix ("8.3.0-beta.1") stops the parse at the first non-numeric
+  part, which is the conservative reading: it compares equal to its own release.
+  """
+  parts: List[int] = []
+  for part in version.split("."):
+    digits = ""
+    for char in part:
+      if not char.isdigit():
+        break
+      digits += char
+    if digits == "":
+      break
+    parts.append(int(digits))
+  return tuple(parts)
+
+
 class _IOLogger:
   """Transparent proxy over the ``ot_api`` module that logs every call at
   ``LOG_LEVEL_IO``.
@@ -848,7 +868,8 @@ class OpentronsOT2Backend(OpentronsBackend):
 
   def _resource_is_trash(self, resource: Resource) -> bool:
     return (
-      cast(str, self.ot_api_version) >= _OT_DECK_IS_ADDRESSABLE_AREA_VERSION
+      _version_tuple(cast(str, self.ot_api_version))
+      >= _version_tuple(_OT_DECK_IS_ADDRESSABLE_AREA_VERSION)
       and resource.name == "trash"
     )
 
