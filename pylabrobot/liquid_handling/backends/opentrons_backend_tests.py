@@ -321,6 +321,16 @@ class OpentronsBackendCommandTests(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(NoChannelError):
       await self.backend.move_channel_x(7, 50.0)
 
+  async def test_get_channel_position_reads_via_save_position(self):
+    """get_channel_position queries savePosition for the channel and returns its deck-frame point."""
+    with patch.object(
+      self.backend, "_run_command", return_value=self._save_position_result(1.0, 2.0, 3.0)
+    ) as mock_command:
+      position = self.backend.get_channel_position(1)
+    mock_command.assert_called_once_with("savePosition", {"pipetteId": "right-pipette-id"})
+    expected = self.backend._robot_to_deck_frame(Coordinate(1.0, 2.0, 3.0))
+    self.assertEqual((position.x, position.y, position.z), (expected.x, expected.y, expected.z))
+
 
 def _make_backend_with_pipettes(left_name="p300_single_gen2", right_name="p20_single_gen2"):
   """Create a backend with pipette state set directly (no ot_api needed)."""

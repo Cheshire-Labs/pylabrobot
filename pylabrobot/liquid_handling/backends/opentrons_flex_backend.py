@@ -666,7 +666,12 @@ class OpentronsFlexBackend(OpentronsBackend):
       MultiHeadDispenseContainer,
     ],
   ) -> Resource:
-    """The resource the head references. For a plate the head aligns nozzle A1 to well A1."""
+    """The resource the head references. For a plate the head aligns nozzle A1 to well A1.
+
+    Safe as a raw coordinate move: moveToCoordinates with no critical point references the head's
+    back-left nozzle in the ALL layout (verified in Opentrons nozzle_manager -- the default is
+    starting_nozzle_offset = back_left, not the head center), so nozzle A1 lands on well A1.
+    """
     if isinstance(op, (MultiHeadAspirationPlate, MultiHeadDispensePlate)):
       return op.wells[0]
     return op.container

@@ -623,6 +623,14 @@ class OpentronsBackend(LiquidHandlerBackend):
     pos = result["result"]["position"]
     return pipette_id, self._robot_to_deck_frame(Coordinate(pos["x"], pos["y"], pos["z"]))
 
+  def get_channel_position(self, channel: int) -> Coordinate:
+    """The channel's current deck-frame position (the mounted tip's end, or the nozzle if none).
+
+    Public read for direct positioning: place a channel with move_channel_*, then read it back.
+    """
+    _, position = self._current_channel_position(channel)
+    return position
+
   async def prepare_for_manual_channel_operation(self, channel: int):
     """Validate channel exists (no-op otherwise)."""
 
