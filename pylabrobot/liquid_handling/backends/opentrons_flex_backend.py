@@ -26,7 +26,8 @@ from pylabrobot.resources.well import Well
 # Addressable area exposed by the trashBinAdapter fixture at A3, used for tip disposal.
 _TRASH_ADDRESSABLE_AREA = "movableTrashA3"
 
-# The robot/* command family is available on robot software 8.2.0+ (confirm via GET /health).
+# Minimum robot software for the robot/* family (moveAxes landed here). The gripper-jaw commands
+# (open/closeGripperJaw) may have a higher real floor; confirm per-command via GET /health.
 _FLEX_ROBOT_COMMANDS_VERSION = "8.2.0"
 
 FlexMotorAxis = Literal[
@@ -61,6 +62,11 @@ _FLEX_GRIPPER_MIN_FORCE = 2.0
 _FLEX_GRIPPER_MAX_FORCE = 30.0
 
 _NINETY_SIX_CHANNEL_COUNT = 96
+
+# The 96-channel nozzle grid is 12 columns x 8 rows at 9 mm pitch: a 99 mm span A1->A12 in x and a
+# 63 mm span A1->H1 in y. Used to center the head over a full-footprint container.
+_NINETY_SIX_HEAD_X_SPAN = (12 - 1) * 9
+_NINETY_SIX_HEAD_Y_SPAN = (8 - 1) * 9
 
 
 def _is_96_channel(pipette_name: str) -> bool:
@@ -118,6 +124,9 @@ class OpentronsFlexBackend(OpentronsBackend):
 
   @property
   def num_channels(self) -> int:
+    """Mounted channel count. A 96-head reports 96, but it is one pipette driven as a unit: use the
+    *96 ops (aspirate96/dispense96/pick_up_tips96) or configure_nozzle_layout for partial columns,
+    not per-channel single ops (which only address channel 0, the whole head)."""
     if self._has_96_head:
       return _NINETY_SIX_CHANNEL_COUNT
     return super().num_channels
@@ -666,15 +675,36 @@ class OpentronsFlexBackend(OpentronsBackend):
       MultiHeadDispenseContainer,
     ],
   ) -> Resource:
-    """The resource the head references. For a plate the head aligns nozzle A1 to well A1.
+    """The resource the head references: well A1 for a plate, the container itself for a container
+    (see _ninety_six_center_offset for how each is positioned under the head).
 
     Safe as a raw coordinate move: moveToCoordinates with no critical point references the head's
     back-left nozzle in the ALL layout (verified in Opentrons nozzle_manager -- the default is
-    starting_nozzle_offset = back_left, not the head center), so nozzle A1 lands on well A1.
+    starting_nozzle_offset = back_left, not the head center).
     """
     if isinstance(op, (MultiHeadAspirationPlate, MultiHeadDispensePlate)):
       return op.wells[0]
     return op.container
+
+  def _ninety_six_center_offset(
+    self,
+    op: Union[
+      MultiHeadAspirationPlate,
+      MultiHeadAspirationContainer,
+      MultiHeadDispensePlate,
+      MultiHeadDispenseContainer,
+    ],
+  ) -> Coordinate:
+    """Offset from the target's center to where the head's back-left reference nozzle must go.
+
+    Zero for a plate: well A1 is the back-left well, so aligning the back-left nozzle to it covers
+    the grid. A container spans the whole footprint, so the head must be centered in it -- the
+    back-left nozzle sits back and left of the container center by half the nozzle-grid span, or
+    ~half the nozzles hang off the edge.
+    """
+    if isinstance(op, (MultiHeadAspirationPlate, MultiHeadDispensePlate)):
+      return Coordinate.zero()
+    return Coordinate(x=-_NINETY_SIX_HEAD_X_SPAN / 2, y=_NINETY_SIX_HEAD_Y_SPAN / 2)
 
   async def _move_96_head_over(
     self, target: Resource, offset: Coordinate, liquid_height: float, pipette_id: str
@@ -703,29 +733,29 @@ class OpentronsFlexBackend(OpentronsBackend):
     """Aspirate from a whole plate (or reservoir) with the 96-channel head."""
     pipette_id = self._require_96_head()
     target = self._ninety_six_target(aspiration)
+    head_offset = aspiration.offset + self._ninety_six_center_offset(aspiration)
     flow_rate = aspiration.flow_rate or self._get_default_aspiration_flow_rate(
       self.get_pipette_name(pipette_id)
     )
-    await self._move_96_head_over(
-      target, aspiration.offset, aspiration.liquid_height or 0, pipette_id
-    )
+    await self._move_96_head_over(target, head_offset, aspiration.liquid_height or 0, pipette_id)
     self._ot.lh.aspirate_in_place(
       volume=aspiration.volume, flow_rate=flow_rate, pipette_id=pipette_id
     )
-    await self._retract_96_head(target, aspiration.offset, pipette_id)
+    await self._retract_96_head(target, head_offset, pipette_id)
 
   async def dispense96(self, dispense: Union[MultiHeadDispensePlate, MultiHeadDispenseContainer]):
     """Dispense to a whole plate (or reservoir) with the 96-channel head."""
     pipette_id = self._require_96_head()
     target = self._ninety_six_target(dispense)
+    head_offset = dispense.offset + self._ninety_six_center_offset(dispense)
     flow_rate = dispense.flow_rate or self._get_default_dispense_flow_rate(
       self.get_pipette_name(pipette_id)
     )
-    await self._move_96_head_over(target, dispense.offset, dispense.liquid_height or 0, pipette_id)
+    await self._move_96_head_over(target, head_offset, dispense.liquid_height or 0, pipette_id)
     self._ot.lh.dispense_in_place(
       volume=dispense.volume, flow_rate=flow_rate, pipette_id=pipette_id
     )
-    await self._retract_96_head(target, dispense.offset, pipette_id)
+    await self._retract_96_head(target, head_offset, pipette_id)
 
   async def pick_up_resource(self, pickup: ResourcePickup):
     labware_id = await self._ensure_movable_labware_loaded(
@@ -738,14 +768,22 @@ class OpentronsFlexBackend(OpentronsBackend):
   ) -> str:
     """Load a resource for a gripper move, reusing any load a pipetting or well-referencing path
     already made so nothing is defined twice under one labware id. Plates and tip racks load with
-    their real definition (so they stay pipettable); anything else gets a minimal movable stub."""
+    their real definition (so they stay pipettable); anything else gets a minimal movable stub.
+
+    Grip height is honored from ``grip_distance_from_top`` only when this call is the one that
+    loads the resource. A resource already loaded for pipetting/touch (which carry no gripper
+    distance) is reused with the robot-server's default mid-height grip -- the same fallback
+    Opentrons' own labware uses when it specifies none.
+    """
     name = resource.name
     if name in self._loaded_plates or name in self._tip_racks or name in self._loaded_labware:
       return self.get_ot_name(name)
     if isinstance(resource, Plate):
       await self._assign_plate(resource, grip_distance_from_top)
     elif isinstance(resource, TipRack):
-      await self._assign_tip_rack(resource, resource.get_item("A1").make_tip())
+      await self._assign_tip_rack(
+        resource, resource.get_item("A1").make_tip(), grip_distance_from_top
+      )
     else:
       self._loaded_labware[name] = self._define_and_load_movable_labware(
         resource, grip_distance_from_top

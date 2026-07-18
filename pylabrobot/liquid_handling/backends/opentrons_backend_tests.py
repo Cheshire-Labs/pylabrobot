@@ -326,7 +326,7 @@ class OpentronsBackendCommandTests(unittest.IsolatedAsyncioTestCase):
     with patch.object(
       self.backend, "_run_command", return_value=self._save_position_result(1.0, 2.0, 3.0)
     ) as mock_command:
-      position = self.backend.get_channel_position(1)
+      position = await self.backend.get_channel_position(1)
     mock_command.assert_called_once_with("savePosition", {"pipetteId": "right-pipette-id"})
     expected = self.backend._robot_to_deck_frame(Coordinate(1.0, 2.0, 3.0))
     self.assertEqual((position.x, position.y, position.z), (expected.x, expected.y, expected.z))

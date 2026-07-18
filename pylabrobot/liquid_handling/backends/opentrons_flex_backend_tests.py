@@ -326,6 +326,18 @@ class Flex96PipettingTests(unittest.IsolatedAsyncioTestCase):
     with self.assertRaisesRegex(ValueError, "front_right_nozzle"):
       await backend.configure_nozzle_layout("QUADRANT", primary_nozzle="A1")
 
+  def test_ninety_six_center_offset_is_zero_for_a_plate(self):
+    backend = self._backend_with_96()
+    off = backend._ninety_six_center_offset(MagicMock(spec=MultiHeadAspirationPlate))
+    self.assertEqual((off.x, off.y), (0, 0))
+
+  def test_ninety_six_center_offset_centers_the_head_over_a_container(self):
+    """A reservoir spans the whole footprint, so the back-left reference nozzle sits back and left
+    of the container center by half the 99x63 mm nozzle grid, else ~half the nozzles hang off."""
+    backend = self._backend_with_96()
+    off = backend._ninety_six_center_offset(MagicMock(spec=MultiHeadAspirationContainer))
+    self.assertEqual((off.x, off.y), (-49.5, 31.5))
+
   def test_pipette_table_has_no_bogus_200ul_entries(self):
     # the Flex ships no 200uL pipette; 96-channel is 1000uL only
     table = OpentronsFlexBackend.pipette_name2volume
@@ -522,6 +534,7 @@ class FlexGripperTests(unittest.IsolatedAsyncioTestCase):
     ):
       await backend._ensure_movable_labware_loaded(rack, grip_distance_from_top=3.0)
     assign.assert_awaited_once()
+    self.assertEqual(assign.await_args.args[2], 3.0)  # the op's grip distance reaches the load
     stub.assert_not_called()
 
   async def test_gripper_reuses_a_plate_already_loaded_for_pipetting(self):

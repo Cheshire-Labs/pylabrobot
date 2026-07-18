@@ -53,9 +53,10 @@ logger = logging.getLogger(__name__)
 def _version_tuple(version: str) -> Tuple[int, ...]:
   """Parse a dotted robot-software version into comparable integers.
 
-  Comparing these as strings puts "10.0.0" below "7.1.0", so any version gate has to compare
-  numerically. A pre-release suffix ("8.3.0-beta.1") stops the parse at the first non-numeric
-  part, which is the conservative reading: it compares equal to its own release.
+  Comparing these as strings puts "10.0.0" below "7.1.0", so the version gate compares numerically.
+  Each dotted segment contributes its leading integer ("0-beta" -> 0); a segment with no leading
+  digit stops the parse. Only used to gate at coarse major.minor granularity, where the exact
+  handling of a pre-release suffix does not change the outcome.
   """
   parts: List[int] = []
   for part in version.split("."):
@@ -247,9 +248,11 @@ class OpentronsBackend(LiquidHandlerBackend):
 
     return None
 
-  def _build_tip_rack_definition(self, tip_rack: TipRack, tip: Tip) -> dict:
+  def _build_tip_rack_definition(
+    self, tip_rack: TipRack, tip: Tip, grip_distance_from_top: Optional[float] = None
+  ) -> dict:
     ot_slot_size_y = 86
-    return {
+    definition: dict = {
       "schemaVersion": 2,
       "version": 1,
       "namespace": "pylabrobot",
@@ -308,9 +311,16 @@ class OpentronsBackend(LiquidHandlerBackend):
         }
       ],
     }
+    if grip_distance_from_top is not None:
+      definition["gripHeightFromLabwareBottom"] = max(
+        0.0, tip_rack.get_absolute_size_z() - grip_distance_from_top
+      )
+    return definition
 
-  async def _assign_tip_rack(self, tip_rack: TipRack, tip: Tip):
-    lw = self._build_tip_rack_definition(tip_rack, tip)
+  async def _assign_tip_rack(
+    self, tip_rack: TipRack, tip: Tip, grip_distance_from_top: Optional[float] = None
+  ):
+    lw = self._build_tip_rack_definition(tip_rack, tip, grip_distance_from_top)
 
     data = self._ot.labware.define(lw)
     namespace, definition, version = data["data"]["definitionUri"].split("/")
@@ -623,10 +633,11 @@ class OpentronsBackend(LiquidHandlerBackend):
     pos = result["result"]["position"]
     return pipette_id, self._robot_to_deck_frame(Coordinate(pos["x"], pos["y"], pos["z"]))
 
-  def get_channel_position(self, channel: int) -> Coordinate:
+  async def get_channel_position(self, channel: int) -> Coordinate:
     """The channel's current deck-frame position (the mounted tip's end, or the nozzle if none).
 
     Public read for direct positioning: place a channel with move_channel_*, then read it back.
+    Async to match the move_channel_* surface, though the underlying savePosition query is blocking.
     """
     _, position = self._current_channel_position(channel)
     return position
