@@ -370,6 +370,28 @@ class OpentronsFlexBackend(OpentronsBackend):
 
     return self._move_axes("robot/moveAxesRelative", axis_map, speed=speed)
 
+  async def move_gripper_to(
+    self, x: float, y: float, z: float, speed: Optional[float] = None
+  ) -> Coordinate:
+    """Move the gripper to an absolute deck-frame position, in mm.
+
+    Uses `robot/moveTo` with the extension mount rather than the `robot/moveAxes*` family: those
+    infer the mount from the axis map, and the server's offset table has no gripper entry, so an
+    `extensionZ` target fails on the robot with `KeyError: Mount.EXTENSION`. The gripper also has a
+    lower Z ceiling than the pipette mounts, so a z a pipette accepts can still be out of bounds.
+
+    Returns:
+      The gripper position after the move, in the deck frame.
+    """
+
+    self._require_robot_commands("robot/moveTo")
+    params: dict = {"mount": "extension", "destination": {"x": x, "y": y, "z": z}}
+    if speed is not None:
+      params["speed"] = speed
+    result = self._run_command("robot/moveTo", params)
+    position = result["result"]["position"]
+    return Coordinate(position["x"], position["y"], position["z"])
+
   async def open_gripper_jaw(self) -> None:
     """Open the gripper jaw, homing it."""
 

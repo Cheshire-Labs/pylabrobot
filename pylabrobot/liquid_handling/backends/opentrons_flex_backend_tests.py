@@ -129,6 +129,28 @@ class FlexRobotCommandTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "2.0"):
           await self.backend.close_gripper_jaw(force=force)
 
+  async def test_move_gripper_to_names_the_extension_mount_instead_of_an_axis_map(self):
+    """The robot/moveAxes* family infers the mount from the axis map, and the server's offset table
+    has no gripper entry, so an extensionZ target fails on the robot with KeyError: Mount.EXTENSION.
+    robot/moveTo names the mount explicitly, which is the only working gripper-motion path."""
+    self.run_command.return_value = {"result": {"position": {"x": 200.0, "y": 210.0, "z": 150.0}}}
+    position = await self.backend.move_gripper_to(x=200.0, y=210.0, z=150.0)
+    command, params = self._sent()
+    self.assertEqual(command, "robot/moveTo")
+    self.assertEqual(
+      params, {"mount": "extension", "destination": {"x": 200.0, "y": 210.0, "z": 150.0}}
+    )
+    self.assertEqual(position, Coordinate(200.0, 210.0, 150.0))
+
+  async def test_move_gripper_to_forwards_speed_only_when_given(self):
+    """Without a speed the robot applies its own default, so send no key at all."""
+    self.run_command.return_value = {"result": {"position": {"x": 1.0, "y": 2.0, "z": 3.0}}}
+    await self.backend.move_gripper_to(x=1.0, y=2.0, z=3.0, speed=50.0)
+    self.assertEqual(self._sent()[1]["speed"], 50.0)
+
+    await self.backend.move_gripper_to(x=1.0, y=2.0, z=3.0)
+    self.assertNotIn("speed", self._sent()[1])
+
   async def test_robot_commands_rejected_below_the_minimum_version(self):
     self.backend.ot_api_version = "8.1.0"
     with self.assertRaisesRegex(RuntimeError, _FLEX_ROBOT_COMMANDS_VERSION):
