@@ -59,6 +59,22 @@ class OpentronsChatterboxTests(unittest.IsolatedAsyncioTestCase):
       self.backend.commands,
     )
 
+  async def test_touch_tip_dry_run_loads_the_plate_and_records(self):
+    """touch_tip on the dry-run backend runs the real _assign_plate (define -> add) then records
+    touchTip. Guards the _loaded_plates init the chatterbox must mirror from the base, and is the
+    only end-to-end coverage of the hoisted OT-2 well-referencing path."""
+    await self.backend.touch_tip(self.plate.get_item("A1"), radius=0.5, use_channel=0)
+    names = _names(self.backend)
+    self.assertIn("labware.define", names)
+    self.assertIn("labware.add", names)
+    self.assertTrue(
+      any(
+        name == "requestor.post" and args[1]["data"]["commandType"] == "touchTip"
+        for name, args, _ in self.backend.commands
+      ),
+      self.backend.commands,
+    )
+
   async def test_full_protocol_records_one_wire_call_per_operation(self):
     """A pickup -> aspirate -> dispense -> trash-discard records exactly one
     wire call each, via the real backend logic."""

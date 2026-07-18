@@ -11,7 +11,7 @@ with ``OpentronsOT2Simulator``, which overrides the high-level methods themselve
 """
 
 import logging
-from typing import Dict, List, Optional, Tuple, cast
+from typing import Dict, List, Optional, Set, Tuple, cast
 
 from pylabrobot.io import LOG_LEVEL_IO
 from pylabrobot.liquid_handling.backends.backend import LiquidHandlerBackend
@@ -163,6 +163,9 @@ class OpentronsOT2ChatterboxBackend(OpentronsOT2Backend):
     # no annotation: the base declares Dict[str, Union[int, str]], since Flex slots are strings
     self._tip_racks = {}
     self._plr_name_to_load_name: Dict[str, str] = {}
+    # Mirror the base __init__: touch_tip/liquid_probe read this, and the chatterbox skips
+    # OpentronsBackend.__init__ (which sets it) to avoid the ot_api requirement.
+    self._loaded_plates: Set[str] = set()
 
   @property
   def commands(self) -> List[Tuple[str, tuple, dict]]:
