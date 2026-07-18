@@ -293,6 +293,42 @@ class OpentronsBackendCommandTests(unittest.IsolatedAsyncioTestCase):
     self.assertAlmostEqual(kwargs["location_z"], 70.0 - corner.z)
 
   @patch("ot_api.lh.move_arm")
+  async def test_move_channel_to_applies_every_supplied_axis_in_one_motion(self, mock_move):
+    """A combined move applies all supplied axes with a SINGLE pose read and a SINGLE motion,
+    rather than the axis-by-axis staircase three separate move_channel_* calls would trace."""
+    with patch.object(
+      self.backend, "_run_command", return_value=self._save_position_result(1.0, 2.0, 3.0)
+    ) as mock_command:
+      await self.backend.move_channel_to(0, x=50.0, y=60.0, z=70.0)
+
+    mock_command.assert_called_once_with("savePosition", {"pipetteId": "left-pipette-id"})
+    self.assertEqual(mock_move.call_count, 1)
+    corner = self.deck.slot_locations[0]
+    kwargs = mock_move.call_args.kwargs
+    self.assertAlmostEqual(kwargs["location_x"], 50.0 - corner.x)
+    self.assertAlmostEqual(kwargs["location_y"], 60.0 - corner.y)
+    self.assertAlmostEqual(kwargs["location_z"], 70.0 - corner.z)
+
+  @patch("ot_api.lh.move_arm")
+  async def test_move_channel_to_holds_the_axes_left_unspecified(self, mock_move):
+    """An omitted axis holds its current value, so a z-only combined move does not disturb x or y."""
+    with patch.object(
+      self.backend, "_run_command", return_value=self._save_position_result(1.0, 2.0, 3.0)
+    ):
+      await self.backend.move_channel_to(0, z=70.0)
+
+    corner = self.deck.slot_locations[0]
+    kwargs = mock_move.call_args.kwargs
+    self.assertAlmostEqual(kwargs["location_x"], 1.0)
+    self.assertAlmostEqual(kwargs["location_y"], 2.0)
+    self.assertAlmostEqual(kwargs["location_z"], 70.0 - corner.z)
+
+  async def test_move_channel_to_rejects_a_move_with_no_axes(self):
+    """Supplying no axis is a caller mistake, not a silent no-op move to the current pose."""
+    with self.assertRaises(ValueError):
+      await self.backend.move_channel_to(0)
+
+  @patch("ot_api.lh.move_arm")
   async def test_move_channel_target_is_deck_frame(self, mock_move):
     """The axis target is a deck-frame coordinate, so a move to slot 1's corner lands on the
     robot origin. savePosition reports the robot frame, so mixing the two would silently offset

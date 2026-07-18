@@ -647,14 +647,30 @@ class OpentronsBackend(LiquidHandlerBackend):
 
     _ = self._pipette_id_for_channel(channel)
 
-  async def _move_channel_axis(self, channel: int, axis: str, value: float):
-    """Move one axis of a channel to an absolute deck-frame coordinate, holding the other two."""
+  async def move_channel_to(
+    self,
+    channel: int,
+    x: Optional[float] = None,
+    y: Optional[float] = None,
+    z: Optional[float] = None,
+  ):
+    """Move a channel to an absolute deck-frame position, holding any axis left unspecified.
+
+    The multi-axis counterpart to move_channel_x/y/z: one position read and one motion, so a
+    combined move travels a single path instead of an axis-by-axis staircase.
+    """
+
+    if x is None and y is None and z is None:
+      raise ValueError("move_channel_to: supply at least one of x, y, z.")
 
     pipette_id, current = self._current_channel_position(channel)
-    target = {"x": current.x, "y": current.y, "z": current.z}
-    target[axis] = value
+    target = Coordinate(
+      x=current.x if x is None else x,
+      y=current.y if y is None else y,
+      z=current.z if z is None else z,
+    )
     await self.move_pipette_head(
-      location=self._deck_to_robot_frame(Coordinate(**target)),
+      location=self._deck_to_robot_frame(target),
       minimum_z_height=self.traversal_height,
       pipette_id=pipette_id,
     )
@@ -662,17 +678,17 @@ class OpentronsBackend(LiquidHandlerBackend):
   async def move_channel_x(self, channel: int, x: float):
     """Move a channel to an absolute x coordinate in the deck frame."""
 
-    await self._move_channel_axis(channel, "x", x)
+    await self.move_channel_to(channel, x=x)
 
   async def move_channel_y(self, channel: int, y: float):
     """Move a channel to an absolute y coordinate in the deck frame."""
 
-    await self._move_channel_axis(channel, "y", y)
+    await self.move_channel_to(channel, y=y)
 
   async def move_channel_z(self, channel: int, z: float):
     """Move a channel to an absolute z coordinate in the deck frame."""
 
-    await self._move_channel_axis(channel, "z", z)
+    await self.move_channel_to(channel, z=z)
 
   async def move_pipette_head(
     self,
