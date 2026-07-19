@@ -559,6 +559,23 @@ class OpentronsMultiChannelTests(unittest.TestCase):
     before it ever reached the robot, which is what portability across liquid handlers rests on."""
     self.assertEqual(self.backend.num_channels, 8)
 
+  def test_channel_groups_report_the_shared_plunger(self):
+    """num_channels counts tip positions; this is what says how many distinct volumes the head can
+    deliver, which is what a caller planning per-channel volumes actually needs."""
+    self.assertEqual(self.backend.channel_groups, [list(range(8))])
+
+  def test_two_single_pipettes_are_two_independent_groups(self):
+    """Two mounts each with their own plunger CAN deliver two different volumes at once, which is
+    the case the single ganged group must not be confused with."""
+    backend = _make_backend_with_pipettes(
+      left_name="p300_single_gen2", right_name="p20_single_gen2"
+    )
+    self.assertEqual(backend.channel_groups, [[0], [1]])
+
+  def test_a_multi_and_a_single_gang_only_within_their_own_pipette(self):
+    backend = _make_backend_with_pipettes(left_name="p300_multi_gen2", right_name="p20_single_gen2")
+    self.assertEqual(backend.channel_groups, [list(range(8)), [8]])
+
   def test_every_nozzle_resolves_to_the_same_pipette(self):
     self.assertEqual({self.backend._pipette_id_for_channel(c) for c in range(8)}, {"left-id"})
 
