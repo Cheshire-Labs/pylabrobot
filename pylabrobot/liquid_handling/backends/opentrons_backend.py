@@ -237,12 +237,10 @@ class OpentronsBackend(LiquidHandlerBackend):
 
   @property
   def channel_groups(self) -> List[List[int]]:
-    """The channels sharing each plunger, so callers can see which ones move as one unit.
+    """The channels sharing each plunger, which is what a caller planning per-channel volumes needs.
 
-    ``num_channels`` counts tip positions and says nothing about how many distinct volumes the
-    head can deliver; this reports that. Each inner list is the channels driven by one plunger, so
-    an 8-channel pipette yields one list of eight, and two single-channel pipettes yield two lists
-    of one. A caller planning per-channel volumes needs this rather than the channel count.
+    ``num_channels`` counts nozzles and cannot answer this: an 8-channel pipette yields one list of
+    eight, while two single-channel pipettes yield two lists of one.
     """
     groups: List[List[int]] = []
     for pipette_id in dict.fromkeys(self._channel_map):

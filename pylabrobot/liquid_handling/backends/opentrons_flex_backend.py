@@ -67,11 +67,6 @@ _NINETY_SIX_HEAD_X_SPAN = (12 - 1) * 9
 _NINETY_SIX_HEAD_Y_SPAN = (8 - 1) * 9
 
 
-def _is_96_channel(pipette_name: str) -> bool:
-  """Whether a reported pipette name denotes a 96-channel head (e.g. p1000_96, p200_96)."""
-  return "96" in pipette_name
-
-
 class OpentronsFlexBackend(OpentronsBackend):
   """Backend for the Opentrons Flex (OT-3) liquid handling robot.
 
@@ -131,7 +126,10 @@ class OpentronsFlexBackend(OpentronsBackend):
   def _has_96_head(self) -> bool:
     """Whether a 96-channel pipette is mounted. It occupies both mounts, so it is mutually
     exclusive with the 1- and 8-channel pipettes, and it always reports on the left mount."""
-    return self.left_pipette is not None and _is_96_channel(self.left_pipette["name"])
+    return (
+      self.left_pipette is not None
+      and self.pipette_name2channels.get(self.left_pipette["name"]) == 96
+    )
 
   @property
   def head96_installed(self) -> Optional[bool]:

@@ -14,6 +14,7 @@ from pylabrobot.liquid_handling.backends.opentrons_backend import (
 from pylabrobot.liquid_handling.errors import NoChannelError
 from pylabrobot.liquid_handling.standard import (
   Drop,
+  Mix,
   Pickup,
   SingleChannelAspiration,
 )
@@ -635,24 +636,29 @@ class OpentronsMultiChannelTests(unittest.TestCase):
       )
 
   def test_every_ganged_parameter_is_checked_not_just_volume(self):
-    """A shared plunger and a rigid mount fix the flow rate, mix, liquid height and offset too.
-    Reading one op and discarding the rest would act on parameters nobody asked for."""
+    """A shared plunger and a rigid mount fix the volume, flow rate, mix, liquid height, blow-out
+    and offset alike. Reading one op and discarding the rest would act on parameters nobody asked
+    for, so each is exercised, not just volume."""
+    odd_mix = Mix(volume=5.0, repetitions=1, flow_rate=None)
     for attribute, values in (
+      ("volume", [100.0] * 7 + [10.0]),
       ("flow_rate", [50.0] * 7 + [10.0]),
       ("liquid_height", [1.0] * 7 + [5.0]),
       ("blow_out_air_volume", [0.0] * 7 + [3.0]),
+      ("offset", [Coordinate.zero()] * 7 + [Coordinate(0, 0, 2.0)]),
+      ("mix", [None] * 7 + [odd_mix]),
     ):
       with self.subTest(attribute=attribute):
         ops = [
           SingleChannelAspiration(
             resource=Well(name="w", size_x=5, size_y=5, size_z=10, max_volume=350),
-            offset=Coordinate.zero(),
+            offset=value if attribute == "offset" else Coordinate.zero(),
             tip=self.tip_200,
-            volume=100.0,
+            volume=value if attribute == "volume" else 100.0,
             flow_rate=value if attribute == "flow_rate" else None,
             liquid_height=value if attribute == "liquid_height" else None,
             blow_out_air_volume=value if attribute == "blow_out_air_volume" else None,
-            mix=None,
+            mix=value if attribute == "mix" else None,
           )
           for value in values
         ]
@@ -679,11 +685,13 @@ class OpentronsMultiChannelTests(unittest.TestCase):
       self.backend._require_nozzle_geometry(skipped)
 
   def test_targets_on_the_nozzle_pitch_are_accepted(self):
+    """A real column of distinct wells at the nozzle pitch is exactly what the array reaches, so it
+    must pass where the off-pitch and cross-x cases raise."""
     column = [
       Pickup(resource=self.tip_rack.get_item(f"{row}1"), offset=Coordinate.zero(), tip=self.tip_200)
       for row in "ABCDEFGH"
     ]
-    self.backend._require_nozzle_geometry(column)
+    self.backend._require_nozzle_geometry(column)  # does not raise
 
   def test_the_command_names_the_back_most_well(self):
     """A full 8-nozzle configuration is commanded by naming ONE well: the one under the A1 nozzle,
