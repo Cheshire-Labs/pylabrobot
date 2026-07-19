@@ -537,6 +537,28 @@ class OpentronsMultiChannelTests(unittest.TestCase):
       fitting_depth=8.0,
       name="test_tip_200",
     )
+    self.plate = celltreat_96_wellplate_350uL_Fb(name="geom_plate")
+    self.deck.assign_child_at_slot(self.plate, slot=11)
+    self.trough = Trough(
+      name="geom_trough",
+      size_x=107.0,
+      size_y=85.0,
+      size_z=44.0,
+      max_volume=100_000,
+      material_z_thickness=1.0,
+    )
+    self.deck.assign_child_at_slot(self.trough, slot=2)
+
+  def _trough_ops(self, resource, count: int, back_offset: float):
+    """Ops that all name one resource, spread back-to-front the way LiquidHandler builds them."""
+    return [
+      Pickup(
+        resource=resource,
+        offset=Coordinate(0, back_offset - i * 9.0, 0),
+        tip=self.tip_200,
+      )
+      for i in range(count)
+    ]
 
   def _aspirations(self, volumes):
     well = Well(name="w", size_x=5, size_y=5, size_z=10, max_volume=350)
@@ -637,15 +659,24 @@ class OpentronsMultiChannelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
           self.backend._require_ganged_parameters(ops, _LIQUID_GANGED_FIELDS)
 
-  def test_targets_off_the_nozzle_pitch_are_refused(self):
-    """The nozzles are one rigid column at a fixed pitch, so a ROW of wells is unreachable however
-    the command is phrased. Sending it anyway would put the head somewhere unintended."""
+  def test_targets_spread_across_x_are_refused(self):
+    """The nozzles share one x, so a ROW of wells is unreachable however the command is phrased."""
     row = [
       Pickup(resource=self.tip_rack.get_item(f"A{col}"), offset=Coordinate.zero(), tip=self.tip_200)
       for col in range(1, 9)
     ]
-    with self.assertRaises(ValueError):
+    with self.assertRaisesRegex(ValueError, "single column"):
       self.backend._require_nozzle_geometry(row)
+
+  def test_targets_in_a_column_but_off_the_pitch_are_refused(self):
+    """One column, right shape, wrong spacing: every other well is 18 mm apart and the rigid array
+    cannot stretch to it. This is the pitch rule rather than the column rule."""
+    skipped = [
+      Pickup(resource=self.tip_rack.get_item(f"{row}1"), offset=Coordinate.zero(), tip=self.tip_200)
+      for row in "ACEG"
+    ]
+    with self.assertRaisesRegex(ValueError, "nozzle pitch"):
+      self.backend._require_nozzle_geometry(skipped)
 
   def test_targets_on_the_nozzle_pitch_are_accepted(self):
     column = [
@@ -673,13 +704,25 @@ class OpentronsMultiChannelTests(unittest.TestCase):
     ]
     self.assertEqual(self.backend._reference_op(ops).offset.y, 31.5)
 
-  def test_a_shared_target_is_exempt_from_the_column_geometry(self):
-    """A trough or the trash is one cavity taking the whole array, not a set of distinct targets."""
-    spot = self.tip_rack.get_item("A1")
-    ops = [
-      Pickup(resource=spot, offset=Coordinate(0, y, 0), tip=self.tip_200) for y in (0.0, 9.0, 18.0)
-    ]
+  def test_a_shared_target_takes_the_whole_array_if_it_holds_it(self):
+    """A trough is one cavity taking every nozzle, so the caller's spread need not match the pitch;
+    what matters is that the array lands inside it."""
+    ops = self._trough_ops(self.trough, count=8, back_offset=31.5)
     self.backend._require_nozzle_geometry(ops)
+
+  def test_a_shared_target_too_small_for_the_array_is_refused(self):
+    """Eight nozzles aimed at ONE well span eight wells of the plate. Accepting it would draw from
+    seven wells nobody named while the liquid tracker debits all of it from the one that was."""
+    well = self.plate.get_well("A1")
+    ops = self._trough_ops(well, count=8, back_offset=0.0)
+    with self.assertRaisesRegex(ValueError, "does not fit"):
+      self.backend._require_nozzle_geometry(ops)
+
+  def test_an_array_hanging_off_the_back_of_a_trough_is_refused(self):
+    """Fitting is about where the array is anchored, not only how deep the resource is."""
+    ops = self._trough_ops(self.trough, count=8, back_offset=self.trough.get_size_y())
+    with self.assertRaisesRegex(ValueError, "does not fit"):
+      self.backend._require_nozzle_geometry(ops)
 
 
 class OpentronsMultiChannelCommandTests(unittest.IsolatedAsyncioTestCase):

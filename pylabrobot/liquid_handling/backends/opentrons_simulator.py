@@ -8,11 +8,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from pylabrobot.liquid_handling.backends.backend import LiquidHandlerBackend
-from pylabrobot.liquid_handling.backends.opentrons_backend import (
-  _LIQUID_GANGED_FIELDS,
-  _TIP_GANGED_FIELDS,
-  OpentronsOT2Backend,
-)
+from pylabrobot.liquid_handling.backends.opentrons_backend import OpentronsOT2Backend
 from pylabrobot.liquid_handling.standard import (
   Drop,
   Pickup,
@@ -136,15 +132,11 @@ class OpentronsOT2Simulator(OpentronsOT2Backend):
 
   async def pick_up_tips(self, ops: List[Pickup], use_channels: List[int], **backend_kwargs):
     pipette_id = self._get_pickup_pipette(ops, use_channels)
-    self._require_ganged_parameters(ops, _TIP_GANGED_FIELDS)
-    self._require_nozzle_geometry(ops)
     self._set_tip_state(pipette_id, True)
     logger.info("Picked up %d tip(s) with pipette %s", len(ops), pipette_id)
 
   async def drop_tips(self, ops: List[Drop], use_channels: List[int], **backend_kwargs):
     pipette_id = self._get_drop_pipette(ops, use_channels)
-    self._require_ganged_parameters(ops, _TIP_GANGED_FIELDS)
-    self._require_nozzle_geometry(ops)
     self._set_tip_state(pipette_id, False)
     logger.info("Dropped %d tip(s) with pipette %s", len(ops), pipette_id)
 
@@ -152,8 +144,6 @@ class OpentronsOT2Simulator(OpentronsOT2Backend):
     self, ops: List[SingleChannelAspiration], use_channels: List[int], **backend_kwargs
   ):
     self._get_liquid_pipette(ops, use_channels)
-    self._require_ganged_parameters(ops, _LIQUID_GANGED_FIELDS)
-    self._require_nozzle_geometry(ops)
     volume = self._ganged_value(ops, "volume")
     logger.info("Aspirated %.2f µL through %d nozzle(s)", volume, len(ops))
 
@@ -161,7 +151,5 @@ class OpentronsOT2Simulator(OpentronsOT2Backend):
     self, ops: List[SingleChannelDispense], use_channels: List[int], **backend_kwargs
   ):
     self._get_liquid_pipette(ops, use_channels)
-    self._require_ganged_parameters(ops, _LIQUID_GANGED_FIELDS)
-    self._require_nozzle_geometry(ops)
     volume = self._ganged_value(ops, "volume")
     logger.info("Dispensed %.2f µL through %d nozzle(s)", volume, len(ops))

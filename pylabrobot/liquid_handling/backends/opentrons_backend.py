@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 # Ops that name a resource per channel, so one of them can be picked as the reference nozzle's.
 _OpT = TypeVar("_OpT", Pickup, Drop, SingleChannelAspiration, SingleChannelDispense)
+_LiquidOpT = TypeVar("_LiquidOpT", SingleChannelAspiration, SingleChannelDispense)
 
 # Centre-to-centre spacing of the nozzles, which is also the SBS well pitch they are built to match.
 _NOZZLE_PITCH_MM = 9.0
@@ -301,29 +302,6 @@ class OpentronsBackend(LiquidHandlerBackend):
       self._plr_name_to_load_name[plr_resource_name] = ot_load_name
     return self._plr_name_to_load_name[plr_resource_name]
 
-  def select_tip_pipette(self, tip: Tip, with_tip: bool) -> Optional[str]:
-    """Select a pipette based on maximum tip volume for tip pick up or drop.
-
-    The volume of the head must match the maximum tip volume. If both pipettes have the same
-    maximum volume, the left pipette is selected.
-
-    Args:
-      with_tip: If True, get a channel that has a tip.
-
-    Returns:
-      The id of the pipette, or None if no pipette is available.
-    """
-
-    if self.can_pick_up_tip(0, tip) and with_tip == self.left_pipette_has_tip:
-      assert self.left_pipette is not None
-      return cast(str, self.left_pipette["pipetteId"])
-
-    if self.can_pick_up_tip(1, tip) and with_tip == self.right_pipette_has_tip:
-      assert self.right_pipette is not None
-      return cast(str, self.right_pipette["pipetteId"])
-
-    return None
-
   def _build_tip_rack_definition(
     self, tip_rack: TipRack, tip: Tip, grip_distance_from_top: Optional[float] = None
   ) -> dict:
@@ -431,6 +409,8 @@ class OpentronsBackend(LiquidHandlerBackend):
     """
     pipette_id = self._one_pipette_for_channels(use_channels)
     self._require_full_nozzle_set(pipette_id, use_channels)
+    self._require_ganged_parameters(ops, _TIP_GANGED_FIELDS)
+    self._require_nozzle_geometry(ops)
     for op in ops:
       assert op.resource.parent is not None, "must not be a floating resource"
     if self._pipette_has_tip(pipette_id):
@@ -445,6 +425,8 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Get the pipette for a tip drop, or raise."""
     pipette_id = self._one_pipette_for_channels(use_channels)
     self._require_full_nozzle_set(pipette_id, use_channels)
+    self._require_ganged_parameters(ops, _TIP_GANGED_FIELDS)
+    self._require_nozzle_geometry(ops)
     for op in ops:
       assert op.resource.parent is not None, "must not be a floating resource"
     if not self._pipette_has_tip(pipette_id):
@@ -453,12 +435,14 @@ class OpentronsBackend(LiquidHandlerBackend):
 
   def _get_liquid_pipette(
     self,
-    ops: Union[List[SingleChannelAspiration], List[SingleChannelDispense]],
+    ops: List[_LiquidOpT],
     use_channels: List[int],
   ) -> str:
     """Get the pipette for an aspirate/dispense, or raise."""
     pipette_id = self._one_pipette_for_channels(use_channels)
     self._require_full_nozzle_set(pipette_id, use_channels)
+    self._require_ganged_parameters(ops, _LIQUID_GANGED_FIELDS)
+    self._require_nozzle_geometry(ops)
     if not self._pipette_has_tip(pipette_id):
       raise NoChannelError(f"{self.get_pipette_name(pipette_id)} carries no tip.")
     return pipette_id
@@ -484,8 +468,6 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Pick up tips from the specified resource."""
 
     pipette_id = self._get_pickup_pipette(ops, use_channels)
-    self._require_ganged_parameters(ops, _TIP_GANGED_FIELDS)
-    self._require_nozzle_geometry(ops)
     op = self._reference_op(ops)
 
     offset_x, offset_y, offset_z = (
@@ -517,9 +499,7 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Drop tips into a tip rack well or the robot's trash."""
 
     pipette_id = self._get_drop_pipette(ops, use_channels)
-    self._require_ganged_parameters(ops, _TIP_GANGED_FIELDS)
     op = self._reference_op(ops)
-    self._require_nozzle_geometry(ops)
 
     offset_x, offset_y = op.offset.x, op.offset.y
     offset_z = op.offset.z + 10  # ad-hoc offset adjustment that makes it smoother
@@ -542,33 +522,6 @@ class OpentronsBackend(LiquidHandlerBackend):
 
     self._set_tip_state(pipette_id, False)
 
-  def select_liquid_pipette(self, volume: float) -> Optional[str]:
-    """Select a pipette based on volume for an aspiration or dispense.
-
-    The volume of the tip mounted on the head must be greater than the volume to aspirate or
-    dispense. If both pipettes have the same maximum volume, the left pipette is selected.
-
-    Only heads with a tip are considered.
-
-    Args:
-      volume: The volume to aspirate or dispense.
-
-    Returns:
-      The id of the pipette, or None if no pipette is available.
-    """
-
-    if self.left_pipette is not None:
-      left_volume = self.pipette_name2volume[self.left_pipette["name"]]
-      if left_volume >= volume and self.left_pipette_has_tip:
-        return cast(str, self.left_pipette["pipetteId"])
-
-    if self.right_pipette is not None:
-      right_volume = self.pipette_name2volume[self.right_pipette["name"]]
-      if right_volume >= volume and self.right_pipette_has_tip:
-        return cast(str, self.right_pipette["pipetteId"])
-
-    return None
-
   def get_pipette_name(self, pipette_id: str) -> str:
     """Get the name of a pipette from its id."""
 
@@ -582,10 +535,6 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Aspirate liquid from the specified resource using pip."""
 
     pipette_id = self._get_liquid_pipette(ops, use_channels)
-    self._require_ganged_parameters(ops, _LIQUID_GANGED_FIELDS)
-    self._require_nozzle_geometry(ops)
-    # Every ganged parameter is now known identical across the ops, so the reference op speaks
-    # for all of them.
     op = self._reference_op(ops)
     volume = op.volume
 
@@ -637,8 +586,6 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Dispense liquid from the specified resource using pip."""
 
     pipette_id = self._get_liquid_pipette(ops, use_channels)
-    self._require_ganged_parameters(ops, _LIQUID_GANGED_FIELDS)
-    self._require_nozzle_geometry(ops)
     op = self._reference_op(ops)
     volume = op.volume
 
@@ -814,11 +761,14 @@ class OpentronsBackend(LiquidHandlerBackend):
     and sending it anyway would put the head somewhere the caller did not mean.
 
     A single shared resource is a different operation, not a violation of this one: the whole array
-    goes into one cavity, which is what a trough or the trash is for. A spread wider than the
-    nozzle pitch is not reproducible there, but every nozzle still lands inside the resource the
-    caller named, because the array is narrower than the spread it is standing in for.
+    goes into one cavity, which is what a trough or the trash is for. There the pitch is not the
+    question, since the caller's per-nozzle spread need not match it; what matters is that the
+    array lands inside the named resource, which is checked instead.
     """
-    if len(ops) < 2 or self._targets_one_resource(ops):
+    if len(ops) < 2:
+      return
+    if self._targets_one_resource(ops):
+      self._require_array_fits_resource(ops)
       return
 
     positions = [op.resource.get_location_wrt(self.deck, "c", "c", "b") for op in ops]
@@ -834,6 +784,26 @@ class OpentronsBackend(LiquidHandlerBackend):
       raise ValueError(
         f"A multi-nozzle command must address targets {_NOZZLE_PITCH_MM} mm apart to match the "
         f"nozzle pitch, got spacings {sorted(spacings)}."
+      )
+
+  def _require_array_fits_resource(self, ops: Sequence[_OpT]) -> None:
+    """Every nozzle aimed into one resource must land inside it, or raise.
+
+    The caller's spread is advisory here, because a rigid array cannot reproduce an arbitrary one;
+    the command carries the reference nozzle's position and the rest follow at the fixed pitch. So
+    what has to hold is containment. Without this, eight nozzles aimed at one WELL are accepted,
+    the array spans eight wells of the plate, and the liquid tracker debits all of it from the one
+    well that was named.
+    """
+    resource = ops[0].resource
+    span = (len(ops) - 1) * _NOZZLE_PITCH_MM
+    half = resource.get_size_y() / 2
+    back = max(op.offset.y for op in ops)
+    if back > half or back - span < -half:
+      raise ValueError(
+        f"{len(ops)} nozzles span {span} mm at a {_NOZZLE_PITCH_MM} mm pitch, which does not fit "
+        f"inside '{resource.name}' ({resource.get_size_y()} mm deep) anchored at {back} mm. Aim "
+        "them at a resource that holds the whole array, or address one nozzle."
       )
 
   def _current_channel_position(self, channel: int) -> Tuple[str, Coordinate]:

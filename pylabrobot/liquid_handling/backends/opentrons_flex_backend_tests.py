@@ -373,13 +373,6 @@ class Flex96PipettingTests(unittest.IsolatedAsyncioTestCase):
     self.assertTrue(backend._tip_volume_supported(1000, 50))
     self.assertFalse(backend._tip_volume_supported(50, 1000))
 
-  def test_1000ul_tips_select_the_p1000_not_the_p50(self):
-    backend = _flex_backend()
-    tip = _tip(1000)
-    self.assertFalse(backend.can_pick_up_tip(0, tip))  # p50 left
-    self.assertTrue(backend.can_pick_up_tip(1, tip))  # p1000 right
-    self.assertEqual(backend.select_tip_pipette(tip, with_tip=False), "R")
-
   def test_trash_resource_routes_to_trash(self):
     trash = FlexDeck().slots["A3"]
     assert trash is not None
