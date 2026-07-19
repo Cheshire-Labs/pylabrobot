@@ -196,7 +196,7 @@ class FlexBackendUnitTests(unittest.TestCase):
     # lookup during setup KeyErrors if it is missing.
     self.assertEqual(OpentronsFlexBackend.pipette_name2volume["p1000_96"], 1000)
 
-  def test_two_hand_pipettes_report_two_channels(self):
+  def test_two_pipettes_report_two_channels(self):
     backend = _flex_backend()  # left p50, right p1000
     self.assertFalse(backend._has_96_head)
     self.assertEqual(backend.num_channels, 2)
@@ -210,7 +210,7 @@ class FlexBackendUnitTests(unittest.TestCase):
 
   def test_96_head_advertises_head96_installed(self):
     backend = _flex_backend()
-    self.assertFalse(backend.head96_installed)  # two hand pipettes
+    self.assertFalse(backend.head96_installed)  # two 1-channel pipettes
     backend.left_pipette = {"pipetteId": "L", "name": "p1000_96"}
     backend.right_pipette = None
     self.assertTrue(backend.head96_installed)
@@ -281,8 +281,8 @@ class Flex96PipettingTests(unittest.IsolatedAsyncioTestCase):
     return backend
 
   async def test_96_ops_require_a_96_head(self):
-    """The *96 methods refuse to run without a 96 head rather than mis-drive a hand pipette."""
-    backend = _flex_backend()  # two hand pipettes, no 96
+    """The *96 methods refuse to run without a 96 head rather than mis-drive a 1-channel pipette."""
+    backend = _flex_backend()  # two 1-channel pipettes, no 96
     with self.assertRaisesRegex(RuntimeError, "96-channel head"):
       backend._require_96_head()
 

@@ -118,8 +118,8 @@ class OpentronsFlexBackend(OpentronsBackend):
 
   @property
   def _has_96_head(self) -> bool:
-    """Whether a 96-channel head is mounted. It is mutually exclusive with hand pipettes and,
-    on the Flex, always reports on the left mount."""
+    """Whether a 96-channel pipette is mounted. It occupies both mounts, so it is mutually
+    exclusive with the 1- and 8-channel pipettes, and it always reports on the left mount."""
     return self.left_pipette is not None and _is_96_channel(self.left_pipette["name"])
 
   @property
