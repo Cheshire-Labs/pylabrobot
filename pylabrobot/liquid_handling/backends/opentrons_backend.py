@@ -497,10 +497,7 @@ class OpentronsBackend(LiquidHandlerBackend):
     pipette_id = self._get_drop_pipette(ops, use_channels)
     self._require_ganged_parameters(ops, _TIP_GANGED_FIELDS)
     op = self._reference_op(ops)
-    # A trash drop legitimately aims every nozzle at one resource, so the column geometry that
-    # applies to a tip rack does not apply here.
-    if not self._resource_is_trash(op.resource):
-      self._require_nozzle_geometry(ops)
+    self._require_nozzle_geometry(ops)
 
     offset_x, offset_y = op.offset.x, op.offset.y
     offset_z = op.offset.z + 10  # ad-hoc offset adjustment that makes it smoother
@@ -730,16 +727,29 @@ class OpentronsBackend(LiquidHandlerBackend):
         "layouts are not supported yet."
       )
 
+  def _targets_one_resource(self, ops: Sequence[_OpT]) -> bool:
+    """Whether every nozzle is aimed into a single resource, as for a trough or the trash.
+
+    LiquidHandler expresses this by repeating one resource per channel and carrying the nozzle
+    spread in the per-op offsets, so the rules that govern distinct targets are answering the
+    wrong question here: there is one target and one head position, not several.
+    """
+    return len({id(op.resource) for op in ops}) == 1
+
   def _reference_op(self, ops: Sequence[_OpT]) -> _OpT:
     """The op under the pipette's reference nozzle.
 
     A full multi-nozzle configuration is commanded by naming ONE well: the one beneath the A1
     nozzle, which sits at the back of the column. Selecting by geometry rather than list order
-    keeps this correct however the caller ordered its channels.
+    keeps this correct however the caller ordered its channels, and including the offset picks the
+    back-most nozzle when the ops share one resource and differ only by their spread.
     """
     # z anchor is "b" rather than "cavity_bottom" so this works for a TipSpot as well as a Well;
     # only y is read.
-    return max(ops, key=lambda op: op.resource.get_location_wrt(self.deck, "c", "c", "b").y)
+    return max(
+      ops,
+      key=lambda op: op.resource.get_location_wrt(self.deck, "c", "c", "b").y + op.offset.y,
+    )
 
   def _ganged_value(self, ops: Sequence[_OpT], attribute: str):
     """The one value a ganged pipette can honor for a per-channel parameter, or raise.
@@ -763,7 +773,13 @@ class OpentronsBackend(LiquidHandlerBackend):
     of individual nozzles. Quietly reading them off one op and discarding the rest would act on
     parameters the caller never asked for, which is the failure the equal-volume rule exists to
     prevent; the same reasoning applies to every one of them.
+
+    Offset is the exception when the ops share one resource: there it describes where each nozzle
+    sits within the single cavity, which the rigid array already satisfies, rather than a position
+    the caller expects the pipette to reach independently.
     """
+    if self._targets_one_resource(ops):
+      attributes = tuple(attribute for attribute in attributes if attribute != "offset")
     for attribute in attributes:
       self._ganged_value(ops, attribute)
 
@@ -771,11 +787,16 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Targets must line up with the fixed nozzle array, or raise.
 
     The nozzles sit in a single column at a fixed pitch and cannot move relative to each other, so
-    a multi-nozzle command can only reach targets in that same arrangement. A row of wells, a
-    scattered set, or several nozzles aimed into one container is unreachable however the command
-    is phrased, and sending it anyway would put the head somewhere the caller did not mean.
+    a multi-nozzle command addressing DISTINCT targets can only reach them in that same
+    arrangement. A row of wells or a scattered set is unreachable however the command is phrased,
+    and sending it anyway would put the head somewhere the caller did not mean.
+
+    A single shared resource is a different operation, not a violation of this one: the whole array
+    goes into one cavity, which is what a trough or the trash is for. A spread wider than the
+    nozzle pitch is not reproducible there, but every nozzle still lands inside the resource the
+    caller named, because the array is narrower than the spread it is standing in for.
     """
-    if len(ops) < 2:
+    if len(ops) < 2 or self._targets_one_resource(ops):
       return
 
     positions = [op.resource.get_location_wrt(self.deck, "c", "c", "b") for op in ops]

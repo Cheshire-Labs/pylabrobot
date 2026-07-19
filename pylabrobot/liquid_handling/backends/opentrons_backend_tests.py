@@ -19,6 +19,7 @@ from pylabrobot.liquid_handling.standard import (
 )
 from pylabrobot.resources import Coordinate, Tip, no_volume_tracking
 from pylabrobot.resources.celltreat import celltreat_96_wellplate_350uL_Fb
+from pylabrobot.resources.trough import Trough
 from pylabrobot.resources.opentrons import (
   OTDeck,
   opentrons_96_filtertiprack_20ul,
@@ -642,6 +643,24 @@ class OpentronsMultiChannelTests(unittest.TestCase):
     ]
     self.assertIs(self.backend._reference_op(ops).resource, self.tip_rack.get_item("A1"))
 
+  def test_a_shared_target_names_the_back_most_nozzle(self):
+    """When every nozzle goes into one resource the ops differ only by their spread offsets, so the
+    reference nozzle has to be read from those rather than from the resource they all share."""
+    spot = self.tip_rack.get_item("A1")
+    ops = [
+      Pickup(resource=spot, offset=Coordinate(0, y, 0), tip=self.tip_200)
+      for y in (-13.5, 31.5, 4.5, -22.5)
+    ]
+    self.assertEqual(self.backend._reference_op(ops).offset.y, 31.5)
+
+  def test_a_shared_target_is_exempt_from_the_column_geometry(self):
+    """A trough or the trash is one cavity taking the whole array, not a set of distinct targets."""
+    spot = self.tip_rack.get_item("A1")
+    ops = [
+      Pickup(resource=spot, offset=Coordinate(0, y, 0), tip=self.tip_200) for y in (0.0, 9.0, 18.0)
+    ]
+    self.backend._require_nozzle_geometry(ops)
+
 
 class OpentronsMultiChannelCommandTests(unittest.IsolatedAsyncioTestCase):
   """End to end: an 8-channel request reaches the robot as ONE command, not eight.
@@ -738,3 +757,123 @@ class OpentronsMultiChannelCommandTests(unittest.IsolatedAsyncioTestCase):
       well.tracker.set_volume(100)
     with self.assertRaises(ValueError):
       await self.lh.aspirate(self.wells, vols=[10, 20, 30, 40, 50, 60, 70, 80])
+
+
+class OpentronsSharedTargetTests(unittest.IsolatedAsyncioTestCase):
+  """Every nozzle into ONE resource: a trough, or the trash.
+
+  This is the operation a multi-channel pipette exists for, and it is shaped differently from a
+  column of wells. LiquidHandler describes it as one resource repeated per channel, carrying the
+  nozzle spread in the per-op offsets, so the column-geometry and identical-offset rules that
+  govern distinct targets do not apply to it.
+  """
+
+  @patch("ot_api.runs.create")
+  @patch("ot_api.health.home")
+  @patch("ot_api.lh.add_mounted_pipettes")
+  @patch("ot_api.labware.add")
+  @patch("ot_api.labware.define")
+  @patch("ot_api.health.get")
+  async def asyncSetUp(
+    self,
+    mock_health_get,
+    mock_define,
+    mock_add,
+    mock_add_mounted_pipettes,
+    mock_home,
+    mock_create,
+  ):
+    mock_add.side_effect = _mock_add
+    mock_define.side_effect = _mock_define
+    mock_add_mounted_pipettes.return_value = (
+      {"pipetteId": "left-pipette-id", "name": "p300_multi_gen2"},
+      None,
+    )
+    mock_create.return_value = "run-id"
+    mock_health_get.return_value = {"api_version": _OT_DECK_IS_ADDRESSABLE_AREA_VERSION}
+
+    self.backend = OpentronsOT2Backend(host="localhost", port=1338)
+    self.deck = OTDeck()
+    self.lh = LiquidHandler(backend=self.backend, deck=self.deck)
+    await self.lh.setup()
+
+    self.tip_rack = opentrons_96_filtertiprack_200ul(name="tip_rack")
+    self.deck.assign_child_at_slot(self.tip_rack, slot=1)
+    self.column = [self.tip_rack.get_item(f"{row}1") for row in "ABCDEFGH"]
+    self.trough = Trough(
+      name="trough",
+      size_x=107.0,
+      size_y=85.0,
+      size_z=44.0,
+      max_volume=100_000,
+      material_z_thickness=1.0,
+    )
+    self.deck.assign_child_at_slot(self.trough, slot=2)
+
+  @patch("ot_api.lh.aspirate_in_place")
+  @patch("ot_api.lh.move_arm")
+  @patch("ot_api.lh.pick_up_tip")
+  @patch("ot_api.labware.add")
+  @patch("ot_api.labware.define")
+  async def test_eight_nozzles_aspirate_from_one_trough(
+    self, mock_define, mock_add, mock_pick_up, mock_move, mock_aspirate
+  ):
+    """The canonical multi-channel operation. The nozzles are already at a fixed pitch, so a
+    single cavity is reachable by all of them at once."""
+    mock_define.side_effect = _mock_define
+    mock_add.side_effect = _mock_add
+    await self.lh.pick_up_tips(self.column)
+    self.trough.tracker.set_volume(50_000)
+    await self.lh.aspirate([self.trough] * 8, vols=[50] * 8)
+    mock_aspirate.assert_called_once()
+    self.assertEqual(mock_aspirate.call_args.kwargs["volume"], 50)
+
+  @patch("ot_api.lh.dispense_in_place")
+  @patch("ot_api.lh.aspirate_in_place")
+  @patch("ot_api.lh.move_arm")
+  @patch("ot_api.lh.pick_up_tip")
+  @patch("ot_api.labware.add")
+  @patch("ot_api.labware.define")
+  async def test_eight_nozzles_dispense_into_one_trough(
+    self, mock_define, mock_add, mock_pick_up, mock_move, mock_aspirate, mock_dispense
+  ):
+    mock_define.side_effect = _mock_define
+    mock_add.side_effect = _mock_add
+    await self.lh.pick_up_tips(self.column)
+    self.trough.tracker.set_volume(50_000)
+    await self.lh.aspirate([self.trough] * 8, vols=[50] * 8)
+    await self.lh.dispense([self.trough] * 8, vols=[50] * 8)
+    mock_dispense.assert_called_once()
+    self.assertEqual(mock_dispense.call_args.kwargs["volume"], 50)
+
+  @patch("ot_api.lh.drop_tip_in_place")
+  @patch("ot_api.lh.move_to_addressable_area_for_drop_tip")
+  @patch("ot_api.lh.move_arm")
+  @patch("ot_api.lh.pick_up_tip")
+  @patch("ot_api.labware.add")
+  @patch("ot_api.labware.define")
+  async def test_eight_tips_discard_to_the_trash(
+    self, mock_define, mock_add, mock_pick_up, mock_move, mock_trash_drop, mock_drop_in_place
+  ):
+    """discard_tips spreads the channels across the trash, so its ops carry differing offsets the
+    way a trough's do."""
+    mock_define.side_effect = _mock_define
+    mock_add.side_effect = _mock_add
+    await self.lh.pick_up_tips(self.column)
+    await self.lh.discard_tips()
+    mock_trash_drop.assert_called_once()
+
+  @patch("ot_api.lh.move_arm")
+  @patch("ot_api.lh.pick_up_tip")
+  @patch("ot_api.labware.add")
+  @patch("ot_api.labware.define")
+  async def test_a_shared_target_still_refuses_per_channel_volumes(
+    self, mock_define, mock_add, mock_pick_up, mock_move
+  ):
+    """Sharing a target relaxes the position rules, never the single-plunger rule."""
+    mock_define.side_effect = _mock_define
+    mock_add.side_effect = _mock_add
+    await self.lh.pick_up_tips(self.column)
+    self.trough.tracker.set_volume(50_000)
+    with self.assertRaisesRegex(ValueError, "volume"):
+      await self.lh.aspirate([self.trough] * 8, vols=[10, 20, 30, 40, 50, 60, 70, 80])
