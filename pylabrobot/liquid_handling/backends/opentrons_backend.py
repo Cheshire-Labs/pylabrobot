@@ -226,6 +226,14 @@ class OpentronsBackend(LiquidHandlerBackend):
     """
     return len(self._channel_map)
 
+  def pipette_name_for_channel(self, channel: int) -> str:
+    """The catalog name of the pipette owning a channel, the public counterpart to channel_groups.
+
+    A group names a plunger only by the channels it drives; this says which pipette that is, and
+    so which volume range and tip compatibility apply to it.
+    """
+    return self.get_pipette_name(self._pipette_id_for_channel(channel))
+
   @property
   def channel_groups(self) -> List[List[int]]:
     """The channels sharing each plunger, so callers can see which ones move as one unit.

@@ -564,6 +564,9 @@ class OpentronsMultiChannelTests(unittest.TestCase):
     deliver, which is what a caller planning per-channel volumes actually needs."""
     self.assertEqual(self.backend.channel_groups, [list(range(8))])
 
+  def test_a_channel_names_its_pipette(self):
+    self.assertEqual(self.backend.pipette_name_for_channel(5), "p300_multi_gen2")
+
   def test_two_single_pipettes_are_two_independent_groups(self):
     """Two mounts each with their own plunger CAN deliver two different volumes at once, which is
     the case the single ganged group must not be confused with."""
