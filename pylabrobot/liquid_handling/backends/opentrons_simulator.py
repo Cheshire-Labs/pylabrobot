@@ -144,12 +144,12 @@ class OpentronsOT2Simulator(OpentronsOT2Backend):
     self, ops: List[SingleChannelAspiration], use_channels: List[int], **backend_kwargs
   ):
     self._get_liquid_pipette(ops, use_channels)
-    volume = self._ganged_volume(ops)
+    volume = self._ganged_value(ops, "volume")
     logger.info("Aspirated %.2f µL through %d nozzle(s)", volume, len(ops))
 
   async def dispense(
     self, ops: List[SingleChannelDispense], use_channels: List[int], **backend_kwargs
   ):
     self._get_liquid_pipette(ops, use_channels)
-    volume = self._ganged_volume(ops)
+    volume = self._ganged_value(ops, "volume")
     logger.info("Dispensed %.2f µL through %d nozzle(s)", volume, len(ops))

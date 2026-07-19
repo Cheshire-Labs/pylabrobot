@@ -7,6 +7,7 @@ pytest.importorskip("ot_api")
 
 from pylabrobot.liquid_handling import LiquidHandler
 from pylabrobot.liquid_handling.backends.opentrons_backend import (
+  _LIQUID_GANGED_FIELDS,
   _OT_DECK_IS_ADDRESSABLE_AREA_VERSION,
   OpentronsOT2Backend,
 )
@@ -580,15 +581,57 @@ class OpentronsMultiChannelTests(unittest.TestCase):
       self.backend._get_pickup_pipette(ops, [0, 1, 2])
 
   def test_uniform_volumes_collapse_to_the_single_plunger_volume(self):
-    self.assertEqual(self.backend._ganged_volume(self._aspirations([100.0] * 8)), 100.0)
+    self.assertEqual(self.backend._ganged_value(self._aspirations([100.0] * 8), "volume"), 100.0)
 
   def test_differing_volumes_are_refused(self):
     """One plunger cannot deliver 8 different volumes. This is the real hardware boundary a
     portable method meets: uniform volumes run anywhere, per-channel volumes need 8 plungers."""
     with self.assertRaises(ValueError):
-      self.backend._ganged_volume(
-        self._aspirations([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0])
+      self.backend._ganged_value(
+        self._aspirations([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]), "volume"
       )
+
+  def test_every_ganged_parameter_is_checked_not_just_volume(self):
+    """A shared plunger and a rigid mount fix the flow rate, mix, liquid height and offset too.
+    Reading one op and discarding the rest would act on parameters nobody asked for."""
+    for attribute, values in (
+      ("flow_rate", [50.0] * 7 + [10.0]),
+      ("liquid_height", [1.0] * 7 + [5.0]),
+      ("blow_out_air_volume", [0.0] * 7 + [3.0]),
+    ):
+      with self.subTest(attribute=attribute):
+        ops = [
+          SingleChannelAspiration(
+            resource=Well(name="w", size_x=5, size_y=5, size_z=10, max_volume=350),
+            offset=Coordinate.zero(),
+            tip=self.tip_200,
+            volume=100.0,
+            flow_rate=value if attribute == "flow_rate" else None,
+            liquid_height=value if attribute == "liquid_height" else None,
+            blow_out_air_volume=value if attribute == "blow_out_air_volume" else None,
+            mix=None,
+          )
+          for value in values
+        ]
+        with self.assertRaises(ValueError):
+          self.backend._require_ganged_parameters(ops, _LIQUID_GANGED_FIELDS)
+
+  def test_targets_off_the_nozzle_pitch_are_refused(self):
+    """The nozzles are one rigid column at a fixed pitch, so a ROW of wells is unreachable however
+    the command is phrased. Sending it anyway would put the head somewhere unintended."""
+    row = [
+      Pickup(resource=self.tip_rack.get_item(f"A{col}"), offset=Coordinate.zero(), tip=self.tip_200)
+      for col in range(1, 9)
+    ]
+    with self.assertRaises(ValueError):
+      self.backend._require_nozzle_geometry(row)
+
+  def test_targets_on_the_nozzle_pitch_are_accepted(self):
+    column = [
+      Pickup(resource=self.tip_rack.get_item(f"{row}1"), offset=Coordinate.zero(), tip=self.tip_200)
+      for row in "ABCDEFGH"
+    ]
+    self.backend._require_nozzle_geometry(column)
 
   def test_the_command_names_the_back_most_well(self):
     """A full 8-nozzle configuration is commanded by naming ONE well: the one under the A1 nozzle,

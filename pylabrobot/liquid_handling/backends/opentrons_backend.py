@@ -52,6 +52,20 @@ logger = logging.getLogger(__name__)
 # Ops that name a resource per channel, so one of them can be picked as the reference nozzle's.
 _OpT = TypeVar("_OpT", Pickup, Drop, SingleChannelAspiration, SingleChannelDispense)
 
+# Centre-to-centre spacing of the nozzles, which is also the SBS well pitch they are built to match.
+_NOZZLE_PITCH_MM = 9.0
+
+# Per-channel parameters a shared plunger and a rigid nozzle array cannot vary between nozzles.
+_LIQUID_GANGED_FIELDS = (
+  "volume",
+  "flow_rate",
+  "liquid_height",
+  "blow_out_air_volume",
+  "mix",
+  "offset",
+)
+_TIP_GANGED_FIELDS = ("offset", "tip")
+
 
 def _version_tuple(version: str) -> Tuple[int, ...]:
   """Parse a dotted robot-software version into comparable integers.
@@ -448,6 +462,8 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Pick up tips from the specified resource."""
 
     pipette_id = self._get_pickup_pipette(ops, use_channels)
+    self._require_ganged_parameters(ops, _TIP_GANGED_FIELDS)
+    self._require_nozzle_geometry(ops)
     op = self._reference_op(ops)
 
     offset_x, offset_y, offset_z = (
@@ -479,7 +495,12 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Drop tips into a tip rack well or the robot's trash."""
 
     pipette_id = self._get_drop_pipette(ops, use_channels)
+    self._require_ganged_parameters(ops, _TIP_GANGED_FIELDS)
     op = self._reference_op(ops)
+    # A trash drop legitimately aims every nozzle at one resource, so the column geometry that
+    # applies to a tip rack does not apply here.
+    if not self._resource_is_trash(op.resource):
+      self._require_nozzle_geometry(ops)
 
     offset_x, offset_y = op.offset.x, op.offset.y
     offset_z = op.offset.z + 10  # ad-hoc offset adjustment that makes it smoother
@@ -542,8 +563,12 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Aspirate liquid from the specified resource using pip."""
 
     pipette_id = self._get_liquid_pipette(ops, use_channels)
+    self._require_ganged_parameters(ops, _LIQUID_GANGED_FIELDS)
+    self._require_nozzle_geometry(ops)
+    # Every ganged parameter is now known identical across the ops, so the reference op speaks
+    # for all of them.
     op = self._reference_op(ops)
-    volume = self._ganged_volume(ops)
+    volume = op.volume
 
     pipette_name = self.get_pipette_name(pipette_id)
     flow_rate = op.flow_rate or self._get_default_aspiration_flow_rate(pipette_name)
@@ -593,8 +618,10 @@ class OpentronsBackend(LiquidHandlerBackend):
     """Dispense liquid from the specified resource using pip."""
 
     pipette_id = self._get_liquid_pipette(ops, use_channels)
+    self._require_ganged_parameters(ops, _LIQUID_GANGED_FIELDS)
+    self._require_nozzle_geometry(ops)
     op = self._reference_op(ops)
-    volume = self._ganged_volume(ops)
+    volume = op.volume
 
     pipette_name = self.get_pipette_name(pipette_id)
     flow_rate = op.flow_rate or self._get_default_dispense_flow_rate(pipette_name)
@@ -714,19 +741,57 @@ class OpentronsBackend(LiquidHandlerBackend):
     # only y is read.
     return max(ops, key=lambda op: op.resource.get_location_wrt(self.deck, "c", "c", "b").y)
 
-  def _ganged_volume(self, ops: Sequence[Union[SingleChannelAspiration, SingleChannelDispense]]):
-    """The one volume every nozzle of a pipette will deliver, or raise.
+  def _ganged_value(self, ops: Sequence[_OpT], attribute: str):
+    """The one value a ganged pipette can honor for a per-channel parameter, or raise.
 
-    All nozzles share a plunger, so differing volumes are unfulfillable rather than approximable.
-    Silently using the first would move the wrong amount of liquid with no error.
+    Compared pairwise rather than through a set so unhashable values (offsets, mixes) work.
     """
-    volumes = {op.volume for op in ops}
-    if len(volumes) != 1:
+    first = getattr(ops[0], attribute)
+    for op in ops[1:]:
+      value = getattr(op, attribute)
+      if value != first:
+        raise ValueError(
+          f"All nozzles on an Opentrons pipette act as one unit, so {attribute} must be identical "
+          f"across the channels in a command, got {first!r} and {value!r}."
+        )
+    return first
+
+  def _require_ganged_parameters(self, ops: Sequence[_OpT], attributes: Tuple[str, ...]) -> None:
+    """Reject any per-channel parameter a single plunger and a rigid nozzle array cannot vary.
+
+    Volume, flow rate, mix, liquid height and offset are properties of the whole pipette here, not
+    of individual nozzles. Quietly reading them off one op and discarding the rest would act on
+    parameters the caller never asked for, which is the failure the equal-volume rule exists to
+    prevent; the same reasoning applies to every one of them.
+    """
+    for attribute in attributes:
+      self._ganged_value(ops, attribute)
+
+  def _require_nozzle_geometry(self, ops: Sequence[_OpT]) -> None:
+    """Targets must line up with the fixed nozzle array, or raise.
+
+    The nozzles sit in a single column at a fixed pitch and cannot move relative to each other, so
+    a multi-nozzle command can only reach targets in that same arrangement. A row of wells, a
+    scattered set, or several nozzles aimed into one container is unreachable however the command
+    is phrased, and sending it anyway would put the head somewhere the caller did not mean.
+    """
+    if len(ops) < 2:
+      return
+
+    positions = [op.resource.get_location_wrt(self.deck, "c", "c", "b") for op in ops]
+    if len({round(position.x, 2) for position in positions}) != 1:
       raise ValueError(
-        "All nozzles on an Opentrons pipette share one plunger and must use the same volume, got "
-        f"{sorted(volumes)}."
+        "A multi-nozzle command must address a single column: the nozzles share one x position, "
+        "so targets spread across x cannot be reached together."
       )
-    return volumes.pop()
+
+    ys = sorted(round(position.y, 2) for position in positions)
+    spacings = {round(later - earlier, 1) for earlier, later in zip(ys, ys[1:])}
+    if spacings != {_NOZZLE_PITCH_MM}:
+      raise ValueError(
+        f"A multi-nozzle command must address targets {_NOZZLE_PITCH_MM} mm apart to match the "
+        f"nozzle pitch, got spacings {sorted(spacings)}."
+      )
 
   def _current_channel_position(self, channel: int) -> Tuple[str, Coordinate]:
     """Return the pipette id and its current position, in the deck frame.
