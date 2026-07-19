@@ -131,23 +131,25 @@ class OpentronsOT2Simulator(OpentronsOT2Backend):
     logger.info("Moved %s to %s (simulated).", pipette_id, location)
 
   async def pick_up_tips(self, ops: List[Pickup], use_channels: List[int], **backend_kwargs):
-    pipette_id = self._get_pickup_pipette(ops)
+    pipette_id = self._get_pickup_pipette(ops, use_channels)
     self._set_tip_state(pipette_id, True)
-    logger.info("Picked up tip from %s with pipette %s", ops[0].resource.name, pipette_id)
+    logger.info("Picked up %d tip(s) with pipette %s", len(ops), pipette_id)
 
   async def drop_tips(self, ops: List[Drop], use_channels: List[int], **backend_kwargs):
-    pipette_id = self._get_drop_pipette(ops)
+    pipette_id = self._get_drop_pipette(ops, use_channels)
     self._set_tip_state(pipette_id, False)
-    logger.info("Dropped tip to %s with pipette %s", ops[0].resource.name, pipette_id)
+    logger.info("Dropped %d tip(s) with pipette %s", len(ops), pipette_id)
 
   async def aspirate(
     self, ops: List[SingleChannelAspiration], use_channels: List[int], **backend_kwargs
   ):
-    self._get_liquid_pipette(ops)
-    logger.info("Aspirated %.2f µL from %s", ops[0].volume, ops[0].resource.name)
+    self._get_liquid_pipette(ops, use_channels)
+    volume = self._ganged_volume(ops)
+    logger.info("Aspirated %.2f µL through %d nozzle(s)", volume, len(ops))
 
   async def dispense(
     self, ops: List[SingleChannelDispense], use_channels: List[int], **backend_kwargs
   ):
-    self._get_liquid_pipette(ops)
-    logger.info("Dispensed %.2f µL to %s", ops[0].volume, ops[0].resource.name)
+    self._get_liquid_pipette(ops, use_channels)
+    volume = self._ganged_volume(ops)
+    logger.info("Dispensed %.2f µL through %d nozzle(s)", volume, len(ops))

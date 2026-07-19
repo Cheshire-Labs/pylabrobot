@@ -3,7 +3,7 @@ import json
 import logging
 import urllib.request
 import uuid
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar, Union, cast
 
 from pylabrobot import utils
 from pylabrobot.io import LOG_LEVEL_IO
@@ -48,6 +48,9 @@ except ImportError as e:
 _OT_DECK_IS_ADDRESSABLE_AREA_VERSION = "7.1.0"
 
 logger = logging.getLogger(__name__)
+
+# Ops that name a resource per channel, so one of them can be picked as the reference nozzle's.
+_OpT = TypeVar("_OpT", Pickup, Drop, SingleChannelAspiration, SingleChannelDispense)
 
 
 def _version_tuple(version: str) -> Tuple[int, ...]:
@@ -114,6 +117,10 @@ class OpentronsBackend(LiquidHandlerBackend):
   # Subclasses fill this with the pipettes their robot reports and the tip volume each accepts.
   pipette_name2volume: Dict[str, int] = {}
 
+  # Nozzles per pipette, keyed identically to pipette_name2volume. A pipette has one plunger
+  # regardless of nozzle count, so this is a tip-position count, never an independent-volume count.
+  pipette_name2channels: Dict[str, int] = {}
+
   def __init__(self, host: str, port: int = 31950):
     super().__init__()
 
@@ -168,9 +175,42 @@ class OpentronsBackend(LiquidHandlerBackend):
     if not skip_home:
       await self.home()
 
+  def _channels_for_pipette(self, pipette: Dict[str, str]) -> int:
+    """Nozzle count for a mounted pipette, from the name the robot reports."""
+    name = pipette["name"]
+    if name not in self.pipette_name2channels:
+      raise ValueError(
+        f"Unknown pipette {name!r}: add it to {type(self).__name__}.pipette_name2channels."
+      )
+    return self.pipette_name2channels[name]
+
+  @property
+  def _channel_map(self) -> List[str]:
+    """One entry per nozzle, left mount first, naming the pipette that owns it.
+
+    An 8-nozzle pipette contributes 8 entries all naming the same pipette, because those nozzles
+    share one plunger: they are 8 tip positions but a single unit of volume control.
+
+    Derived on read rather than cached at setup, so it cannot go stale against the mounted
+    pipettes it describes.
+    """
+    channel_map: List[str] = []
+    for pipette in (self.left_pipette, self.right_pipette):
+      if pipette is None:
+        continue
+      channel_map.extend([pipette["pipetteId"]] * self._channels_for_pipette(pipette))
+    return channel_map
+
   @property
   def num_channels(self) -> int:
-    return len([p for p in [self.left_pipette, self.right_pipette] if p is not None])
+    """The number of NOZZLES across the mounted pipettes.
+
+    That is what pylabrobot means by a channel: one tip-bearing position, one entry in
+    ``LiquidHandler.head``. It is NOT the number of independent volumes. Every Opentrons pipette
+    has exactly one plunger, so an 8-nozzle pipette contributes 8 channels that necessarily
+    deliver the same volume as each other.
+    """
+    return len(self._channel_map)
 
   async def stop(self):
     """Cancel any active OT run, then clear labware definitions."""
@@ -339,34 +379,52 @@ class OpentronsBackend(LiquidHandlerBackend):
 
     self._tip_racks[tip_rack.name] = slot
 
-  def _get_pickup_pipette(self, ops: List[Pickup]) -> str:
-    """Get the pipette for a tip pick-up, or raise."""
-    assert len(ops) == 1, "only one channel supported for now"
-    op = ops[0]
-    assert op.resource.parent is not None, "must not be a floating resource"
-    pipette_id = self.select_tip_pipette(op.tip, with_tip=False)
-    if not pipette_id:
-      raise NoChannelError("No pipette channel of right type with no tip available.")
+  def _pipette_has_tip(self, pipette_id: str) -> bool:
+    """Whether the pipette currently carries tips. Every nozzle takes and drops together."""
+    if self.left_pipette is not None and pipette_id == self.left_pipette["pipetteId"]:
+      return self.left_pipette_has_tip
+    if self.right_pipette is not None and pipette_id == self.right_pipette["pipetteId"]:
+      return self.right_pipette_has_tip
+    raise ValueError(f"Unknown or unconfigured pipette_id {pipette_id!r}.")
+
+  def _get_pickup_pipette(self, ops: List[Pickup], use_channels: List[int]) -> str:
+    """Get the pipette for a tip pick-up, or raise.
+
+    The channels the caller asked for determine the pipette, rather than searching the mounts for
+    one that fits: a nozzle index already names its pipette.
+    """
+    pipette_id = self._one_pipette_for_channels(use_channels)
+    self._require_full_nozzle_set(pipette_id, use_channels)
+    for op in ops:
+      assert op.resource.parent is not None, "must not be a floating resource"
+    if self._pipette_has_tip(pipette_id):
+      raise NoChannelError(f"{self.get_pipette_name(pipette_id)} already carries tips.")
+    if not self.can_pick_up_tip(use_channels[0], ops[0].tip):
+      raise NoChannelError(
+        f"{self.get_pipette_name(pipette_id)} does not accept a {ops[0].tip.maximal_volume} uL tip."
+      )
     return pipette_id
 
-  def _get_drop_pipette(self, ops: List[Drop]) -> str:
+  def _get_drop_pipette(self, ops: List[Drop], use_channels: List[int]) -> str:
     """Get the pipette for a tip drop, or raise."""
-    assert len(ops) == 1, "only one channel supported for now"
-    op = ops[0]
-    assert op.resource.parent is not None, "must not be a floating resource"
-    pipette_id = self.select_tip_pipette(op.tip, with_tip=True)
-    if not pipette_id:
-      raise NoChannelError("No pipette channel of right type with tip available.")
+    pipette_id = self._one_pipette_for_channels(use_channels)
+    self._require_full_nozzle_set(pipette_id, use_channels)
+    for op in ops:
+      assert op.resource.parent is not None, "must not be a floating resource"
+    if not self._pipette_has_tip(pipette_id):
+      raise NoChannelError(f"{self.get_pipette_name(pipette_id)} carries no tips to drop.")
     return pipette_id
 
   def _get_liquid_pipette(
-    self, ops: Union[List[SingleChannelAspiration], List[SingleChannelDispense]]
+    self,
+    ops: Union[List[SingleChannelAspiration], List[SingleChannelDispense]],
+    use_channels: List[int],
   ) -> str:
     """Get the pipette for an aspirate/dispense, or raise."""
-    assert len(ops) == 1, "only one channel supported for now"
-    pipette_id = self.select_liquid_pipette(ops[0].volume)
-    if pipette_id is None:
-      raise NoChannelError("No pipette channel of right type with tip available.")
+    pipette_id = self._one_pipette_for_channels(use_channels)
+    self._require_full_nozzle_set(pipette_id, use_channels)
+    if not self._pipette_has_tip(pipette_id):
+      raise NoChannelError(f"{self.get_pipette_name(pipette_id)} carries no tip.")
     return pipette_id
 
   def _set_tip_state(self, pipette_id: str, has_tip: bool):
@@ -389,8 +447,8 @@ class OpentronsBackend(LiquidHandlerBackend):
   async def pick_up_tips(self, ops: List[Pickup], use_channels: List[int]):
     """Pick up tips from the specified resource."""
 
-    pipette_id = self._get_pickup_pipette(ops)
-    op = ops[0]
+    pipette_id = self._get_pickup_pipette(ops, use_channels)
+    op = self._reference_op(ops)
 
     offset_x, offset_y, offset_z = (
       op.offset.x,
@@ -420,8 +478,8 @@ class OpentronsBackend(LiquidHandlerBackend):
   async def drop_tips(self, ops: List[Drop], use_channels: List[int]):
     """Drop tips into a tip rack well or the robot's trash."""
 
-    pipette_id = self._get_drop_pipette(ops)
-    op = ops[0]
+    pipette_id = self._get_drop_pipette(ops, use_channels)
+    op = self._reference_op(ops)
 
     offset_x, offset_y = op.offset.x, op.offset.y
     offset_z = op.offset.z + 10  # ad-hoc offset adjustment that makes it smoother
@@ -483,9 +541,9 @@ class OpentronsBackend(LiquidHandlerBackend):
   async def aspirate(self, ops: List[SingleChannelAspiration], use_channels: List[int]):
     """Aspirate liquid from the specified resource using pip."""
 
-    pipette_id = self._get_liquid_pipette(ops)
-    op = ops[0]
-    volume = op.volume
+    pipette_id = self._get_liquid_pipette(ops, use_channels)
+    op = self._reference_op(ops)
+    volume = self._ganged_volume(ops)
 
     pipette_name = self.get_pipette_name(pipette_id)
     flow_rate = op.flow_rate or self._get_default_aspiration_flow_rate(pipette_name)
@@ -534,9 +592,9 @@ class OpentronsBackend(LiquidHandlerBackend):
   async def dispense(self, ops: List[SingleChannelDispense], use_channels: List[int]):
     """Dispense liquid from the specified resource using pip."""
 
-    pipette_id = self._get_liquid_pipette(ops)
-    op = ops[0]
-    volume = op.volume
+    pipette_id = self._get_liquid_pipette(ops, use_channels)
+    op = self._reference_op(ops)
+    volume = self._ganged_volume(ops)
 
     pipette_name = self.get_pipette_name(pipette_id)
     flow_rate = op.flow_rate or self._get_default_dispense_flow_rate(pipette_name)
@@ -612,14 +670,63 @@ class OpentronsBackend(LiquidHandlerBackend):
     return cast(List[dict], self._ot.modules.list_connected_modules())
 
   def _pipette_id_for_channel(self, channel: int) -> str:
-    pipettes = []
-    if self.left_pipette is not None:
-      pipettes.append(self.left_pipette["pipetteId"])
-    if self.right_pipette is not None:
-      pipettes.append(self.right_pipette["pipetteId"])
-    if channel < 0 or channel >= len(pipettes):
+    if channel < 0 or channel >= len(self._channel_map):
       raise NoChannelError(f"Channel {channel} not available on this Opentrons setup.")
-    return pipettes[channel]
+    return self._channel_map[channel]
+
+  def _one_pipette_for_channels(self, use_channels: List[int]) -> str:
+    """The single pipette driving every requested channel, or raise.
+
+    One Opentrons command addresses one pipette. Channels spanning two mounts would need two
+    commands, which these call sites do not emit.
+    """
+    pipette_ids = {self._pipette_id_for_channel(channel) for channel in use_channels}
+    if len(pipette_ids) != 1:
+      raise NoChannelError(
+        f"Channels {use_channels} span {len(pipette_ids)} pipettes; an Opentrons command "
+        "addresses one pipette at a time."
+      )
+    return pipette_ids.pop()
+
+  def _require_full_nozzle_set(self, pipette_id: str, use_channels: List[int]) -> None:
+    """Refuse a partial request on a multi-nozzle pipette.
+
+    Engaging a subset of nozzles requires configureNozzleLayout, which this backend does not emit
+    yet. Without that the robot would run its full configuration regardless, picking up or
+    aspirating with every nozzle while the caller believes it addressed only some.
+    """
+    nozzles = self._channel_map.count(pipette_id)
+    if len(use_channels) != nozzles:
+      raise NoChannelError(
+        f"{self.get_pipette_name(pipette_id)} has {nozzles} nozzles and runs its full "
+        f"configuration, but {len(use_channels)} channel(s) were requested. Partial nozzle "
+        "layouts are not supported yet."
+      )
+
+  def _reference_op(self, ops: Sequence[_OpT]) -> _OpT:
+    """The op under the pipette's reference nozzle.
+
+    A full multi-nozzle configuration is commanded by naming ONE well: the one beneath the A1
+    nozzle, which sits at the back of the column. Selecting by geometry rather than list order
+    keeps this correct however the caller ordered its channels.
+    """
+    # z anchor is "b" rather than "cavity_bottom" so this works for a TipSpot as well as a Well;
+    # only y is read.
+    return max(ops, key=lambda op: op.resource.get_location_wrt(self.deck, "c", "c", "b").y)
+
+  def _ganged_volume(self, ops: Sequence[Union[SingleChannelAspiration, SingleChannelDispense]]):
+    """The one volume every nozzle of a pipette will deliver, or raise.
+
+    All nozzles share a plunger, so differing volumes are unfulfillable rather than approximable.
+    Silently using the first would move the wrong amount of liquid with no error.
+    """
+    volumes = {op.volume for op in ops}
+    if len(volumes) != 1:
+      raise ValueError(
+        "All nozzles on an Opentrons pipette share one plunger and must use the same volume, got "
+        f"{sorted(volumes)}."
+      )
+    return volumes.pop()
 
   def _current_channel_position(self, channel: int) -> Tuple[str, Coordinate]:
     """Return the pipette id and its current position, in the deck frame.
@@ -730,15 +837,9 @@ class OpentronsBackend(LiquidHandlerBackend):
     )
 
   def can_pick_up_tip(self, channel_idx: int, tip: Tip) -> bool:
-    if channel_idx == 0:
-      pipette = self.left_pipette
-    elif channel_idx == 1:
-      pipette = self.right_pipette
-    else:
+    if channel_idx < 0 or channel_idx >= len(self._channel_map):
       return False
-    if pipette is None:
-      return False
-    channel_volume = self.pipette_name2volume[pipette["name"]]
+    channel_volume = self.pipette_name2volume[self.get_pipette_name(self._channel_map[channel_idx])]
     return self._tip_volume_supported(channel_volume, tip.maximal_volume)
 
   # --- override hooks: implemented per concrete robot ---
@@ -809,6 +910,23 @@ class OpentronsOT2Backend(OpentronsBackend):
     "p1000_single_gen2": 1000,
     "p300_single_gen3": 300,
     "p1000_single_gen3": 1000,
+  }
+
+  pipette_name2channels = {
+    "p10_single": 1,
+    "p10_multi": 8,
+    "p20_single_gen2": 1,
+    "p20_multi_gen2": 8,
+    "p50_single": 1,
+    "p50_multi": 8,
+    "p300_single": 1,
+    "p300_multi": 8,
+    "p300_single_gen2": 1,
+    "p300_multi_gen2": 8,
+    "p1000_single": 1,
+    "p1000_single_gen2": 1,
+    "p300_single_gen3": 1,
+    "p1000_single_gen3": 1,
   }
 
   def _deck_to_robot_frame(self, location: Coordinate) -> Coordinate:

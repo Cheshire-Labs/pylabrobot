@@ -18,7 +18,11 @@ from pylabrobot.liquid_handling.standard import (
 )
 from pylabrobot.resources import Coordinate, Tip, no_volume_tracking
 from pylabrobot.resources.celltreat import celltreat_96_wellplate_350uL_Fb
-from pylabrobot.resources.opentrons import OTDeck, opentrons_96_filtertiprack_20ul
+from pylabrobot.resources.opentrons import (
+  OTDeck,
+  opentrons_96_filtertiprack_20ul,
+  opentrons_96_filtertiprack_200ul,
+)
 from pylabrobot.resources.well import Well
 
 
@@ -404,19 +408,33 @@ class OpentronsSharedHelperTests(unittest.TestCase):
 
   # -- _get_pickup_pipette --
 
-  def test_get_pickup_pipette_selects_right_for_20ul(self):
-    ops = [Pickup(resource=self.tip_spot, offset=Coordinate.zero(), tip=self.tip_20)]
-    self.assertEqual(self.backend._get_pickup_pipette(ops), "right-id")
+  def test_get_pickup_pipette_resolves_the_requested_channel_to_its_pipette(self):
+    """The requested channel names the pipette, rather than the backend re-deciding from the tip.
 
-  def test_get_pickup_pipette_selects_left_for_300ul(self):
+    A channel index is a tip-bearing position, and on a multi-nozzle pipette several of them name
+    the same pipette, so the mapping only runs one way. Honoring the caller's channels is also
+    what lets a method written for another liquid handler run here unchanged.
+    """
+    ops_20 = [Pickup(resource=self.tip_spot, offset=Coordinate.zero(), tip=self.tip_20)]
+    ops_300 = [Pickup(resource=self.tip_spot, offset=Coordinate.zero(), tip=self.tip_300)]
+    self.assertEqual(self.backend._get_pickup_pipette(ops_20, [1]), "right-id")
+    self.assertEqual(self.backend._get_pickup_pipette(ops_300, [0]), "left-id")
+
+  def test_get_pickup_pipette_rejects_a_tip_the_requested_pipette_cannot_take(self):
+    """Honoring the channel is not the same as accepting an impossible tip.
+
+    LiquidHandler normally avoids this by consulting can_pick_up_tip while choosing channels; this
+    is the backstop for a caller that reaches the backend directly.
+    """
     ops = [Pickup(resource=self.tip_spot, offset=Coordinate.zero(), tip=self.tip_300)]
-    self.assertEqual(self.backend._get_pickup_pipette(ops), "left-id")
+    with self.assertRaises(NoChannelError):
+      self.backend._get_pickup_pipette(ops, [1])
 
   def test_get_pickup_pipette_raises_when_tip_already_mounted(self):
     self.backend.right_pipette_has_tip = True
     ops = [Pickup(resource=self.tip_spot, offset=Coordinate.zero(), tip=self.tip_20)]
     with self.assertRaises(NoChannelError):
-      self.backend._get_pickup_pipette(ops)
+      self.backend._get_pickup_pipette(ops, [1])
 
   # -- _deck_to_robot_frame --
 
@@ -433,20 +451,22 @@ class OpentronsSharedHelperTests(unittest.TestCase):
 
   # -- _get_drop_pipette --
 
-  def test_get_drop_pipette_selects_right_for_20ul(self):
+  def test_get_drop_pipette_resolves_the_requested_channel_to_its_pipette(self):
     self.backend.right_pipette_has_tip = True
     ops = [Drop(resource=self.tip_spot, offset=Coordinate.zero(), tip=self.tip_20)]
-    self.assertEqual(self.backend._get_drop_pipette(ops), "right-id")
+    self.assertEqual(self.backend._get_drop_pipette(ops, [1]), "right-id")
 
   def test_get_drop_pipette_raises_when_no_tip(self):
     ops = [Drop(resource=self.tip_spot, offset=Coordinate.zero(), tip=self.tip_20)]
     with self.assertRaises(NoChannelError):
-      self.backend._get_drop_pipette(ops)
+      self.backend._get_drop_pipette(ops, [1])
 
   # -- _get_liquid_pipette --
 
-  def test_get_liquid_pipette_selects_left_for_large_volume(self):
+  def test_get_liquid_pipette_resolves_the_requested_channel_to_its_pipette(self):
+    """Which pipette aspirates follows from the channel asked for, not from the volume."""
     self.backend.left_pipette_has_tip = True
+    self.backend.right_pipette_has_tip = True
     well = Well(name="w", size_x=5, size_y=5, size_z=10, max_volume=350)
     ops = [
       SingleChannelAspiration(
@@ -460,24 +480,8 @@ class OpentronsSharedHelperTests(unittest.TestCase):
         mix=None,
       )
     ]
-    self.assertEqual(self.backend._get_liquid_pipette(ops), "left-id")
-
-  def test_get_liquid_pipette_selects_right_for_small_volume(self):
-    self.backend.right_pipette_has_tip = True
-    well = Well(name="w", size_x=5, size_y=5, size_z=10, max_volume=350)
-    ops = [
-      SingleChannelAspiration(
-        resource=well,
-        offset=Coordinate.zero(),
-        tip=self.tip_20,
-        volume=5,
-        flow_rate=None,
-        liquid_height=None,
-        blow_out_air_volume=None,
-        mix=None,
-      )
-    ]
-    self.assertEqual(self.backend._get_liquid_pipette(ops), "right-id")
+    self.assertEqual(self.backend._get_liquid_pipette(ops, [0]), "left-id")
+    self.assertEqual(self.backend._get_liquid_pipette(ops, [1]), "right-id")
 
   def test_get_liquid_pipette_raises_without_tip(self):
     well = Well(name="w", size_x=5, size_y=5, size_z=10, max_volume=350)
@@ -494,7 +498,7 @@ class OpentronsSharedHelperTests(unittest.TestCase):
       )
     ]
     with self.assertRaises(NoChannelError):
-      self.backend._get_liquid_pipette(ops)
+      self.backend._get_liquid_pipette(ops, [1])
 
   # -- _set_tip_state --
 
@@ -507,3 +511,187 @@ class OpentronsSharedHelperTests(unittest.TestCase):
     self.backend._set_tip_state("right-id", True)
     self.assertFalse(self.backend.left_pipette_has_tip)
     self.assertTrue(self.backend.right_pipette_has_tip)
+
+
+class OpentronsMultiChannelTests(unittest.TestCase):
+  """An 8-channel pipette is 8 nozzles driven by ONE plunger.
+
+  Those nozzles are 8 tip-bearing positions, so they are 8 pylabrobot channels, but they share a
+  single volume. These pin both halves: the channel count LiquidHandler needs before it will
+  dispatch an 8-channel method at all, and the ganged-volume constraint that keeps the shared
+  plunger honest.
+  """
+
+  def setUp(self):
+    self.backend = _make_backend_with_pipettes(left_name="p300_multi_gen2", right_name=None)
+    self.deck = OTDeck()
+    self.backend.set_deck(self.deck)
+    self.tip_rack = opentrons_96_filtertiprack_200ul(name="tip_rack")
+    self.deck.assign_child_at_slot(self.tip_rack, slot=1)
+    self.tip_200 = Tip(
+      has_filter=True,
+      total_tip_length=51.0,
+      maximal_volume=200,
+      fitting_depth=8.0,
+      name="test_tip_200",
+    )
+
+  def _aspirations(self, volumes):
+    well = Well(name="w", size_x=5, size_y=5, size_z=10, max_volume=350)
+    return [
+      SingleChannelAspiration(
+        resource=well,
+        offset=Coordinate.zero(),
+        tip=self.tip_200,
+        volume=volume,
+        flow_rate=None,
+        liquid_height=None,
+        blow_out_air_volume=None,
+        mix=None,
+      )
+      for volume in volumes
+    ]
+
+  def test_reports_one_channel_per_nozzle(self):
+    """Reporting the mount count instead would make LiquidHandler reject an 8-channel method
+    before it ever reached the robot, which is what portability across liquid handlers rests on."""
+    self.assertEqual(self.backend.num_channels, 8)
+
+  def test_every_nozzle_resolves_to_the_same_pipette(self):
+    self.assertEqual({self.backend._pipette_id_for_channel(c) for c in range(8)}, {"left-id"})
+
+  def test_channel_beyond_the_nozzle_count_is_rejected(self):
+    with self.assertRaises(NoChannelError):
+      self.backend._pipette_id_for_channel(8)
+
+  def test_can_pick_up_tip_answers_for_every_nozzle(self):
+    """can_pick_up_tip is how LiquidHandler picks channels, so it has to answer for all 8."""
+    self.assertTrue(all(self.backend.can_pick_up_tip(c, self.tip_200) for c in range(8)))
+    self.assertFalse(self.backend.can_pick_up_tip(8, self.tip_200))
+
+  def test_partial_nozzle_request_is_refused(self):
+    """The robot runs its full configuration regardless, engaging all 8 nozzles while the caller
+    believed it addressed 3. Refusing is honest until configureNozzleLayout is wired up."""
+    ops = [
+      Pickup(resource=self.tip_rack.get_item(i), offset=Coordinate.zero(), tip=self.tip_200)
+      for i in range(3)
+    ]
+    with self.assertRaises(NoChannelError):
+      self.backend._get_pickup_pipette(ops, [0, 1, 2])
+
+  def test_uniform_volumes_collapse_to_the_single_plunger_volume(self):
+    self.assertEqual(self.backend._ganged_volume(self._aspirations([100.0] * 8)), 100.0)
+
+  def test_differing_volumes_are_refused(self):
+    """One plunger cannot deliver 8 different volumes. This is the real hardware boundary a
+    portable method meets: uniform volumes run anywhere, per-channel volumes need 8 plungers."""
+    with self.assertRaises(ValueError):
+      self.backend._ganged_volume(
+        self._aspirations([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0])
+      )
+
+  def test_the_command_names_the_back_most_well(self):
+    """A full 8-nozzle configuration is commanded by naming ONE well: the one under the A1 nozzle,
+    at the back of the column. Naming any other would offset the whole head by a row."""
+    ops = [
+      Pickup(resource=self.tip_rack.get_item(f"{row}1"), offset=Coordinate.zero(), tip=self.tip_200)
+      for row in "ABCDEFGH"
+    ]
+    self.assertIs(self.backend._reference_op(ops).resource, self.tip_rack.get_item("A1"))
+
+
+class OpentronsMultiChannelCommandTests(unittest.IsolatedAsyncioTestCase):
+  """End to end: an 8-channel request reaches the robot as ONE command, not eight.
+
+  One plunger and one rigid nozzle array mean one pickUpTip and one aspirate. Emitting eight would
+  describe eight separate physical operations, which is not what the hardware performs.
+  """
+
+  @patch("ot_api.runs.create")
+  @patch("ot_api.health.home")
+  @patch("ot_api.lh.add_mounted_pipettes")
+  @patch("ot_api.labware.add")
+  @patch("ot_api.labware.define")
+  @patch("ot_api.health.get")
+  async def asyncSetUp(
+    self,
+    mock_health_get,
+    mock_define,
+    mock_add,
+    mock_add_mounted_pipettes,
+    mock_home,
+    mock_create,
+  ):
+    mock_add.side_effect = _mock_add
+    mock_define.side_effect = _mock_define
+    mock_add_mounted_pipettes.return_value = (
+      {"pipetteId": "left-pipette-id", "name": "p300_multi_gen2"},
+      None,
+    )
+    mock_create.return_value = "run-id"
+    mock_health_get.side_effect = _mock_health_get
+
+    self.backend = OpentronsOT2Backend(host="localhost", port=1338)
+    self.deck = OTDeck()
+    self.lh = LiquidHandler(backend=self.backend, deck=self.deck)
+    await self.lh.setup()
+
+    self.tip_rack = opentrons_96_filtertiprack_200ul(name="tip_rack")
+    self.deck.assign_child_at_slot(self.tip_rack, slot=1)
+    self.plate = celltreat_96_wellplate_350uL_Fb(name="plate")
+    self.deck.assign_child_at_slot(self.plate, slot=11)
+    self.column = [self.tip_rack.get_item(f"{row}1") for row in "ABCDEFGH"]
+    self.wells = [self.plate.get_well(f"{row}1") for row in "ABCDEFGH"]
+
+  async def test_the_frontend_sizes_its_head_to_the_nozzles(self):
+    """Without this, LiquidHandler refuses an 8-channel request before the backend is reached."""
+    self.assertEqual(self.backend.num_channels, 8)
+    self.assertEqual(len(self.lh.head), 8)
+
+  @patch("ot_api.lh.pick_up_tip")
+  @patch("ot_api.labware.add")
+  @patch("ot_api.labware.define")
+  async def test_eight_tip_pickup_sends_one_command_naming_the_back_well(
+    self, mock_define, mock_add, mock_pick_up
+  ):
+    mock_define.side_effect = _mock_define
+    mock_add.side_effect = _mock_add
+    await self.lh.pick_up_tips(self.column)
+    mock_pick_up.assert_called_once()
+    self.assertEqual(
+      mock_pick_up.call_args.kwargs["well_name"], self.backend.get_ot_name("tip_rack_A1")
+    )
+
+  @patch("ot_api.lh.aspirate_in_place")
+  @patch("ot_api.lh.move_arm")
+  @patch("ot_api.lh.pick_up_tip")
+  @patch("ot_api.labware.add")
+  @patch("ot_api.labware.define")
+  async def test_eight_channel_aspirate_sends_one_command(
+    self, mock_define, mock_add, mock_pick_up, mock_move, mock_aspirate
+  ):
+    mock_define.side_effect = _mock_define
+    mock_add.side_effect = _mock_add
+    await self.lh.pick_up_tips(self.column)
+    for well in self.wells:
+      well.tracker.set_volume(50)
+    await self.lh.aspirate(self.wells, vols=[50] * 8)
+    mock_aspirate.assert_called_once()
+    self.assertEqual(mock_aspirate.call_args.kwargs["volume"], 50)
+
+  @patch("ot_api.lh.move_arm")
+  @patch("ot_api.lh.pick_up_tip")
+  @patch("ot_api.labware.add")
+  @patch("ot_api.labware.define")
+  async def test_per_channel_volumes_are_refused(
+    self, mock_define, mock_add, mock_pick_up, mock_move
+  ):
+    mock_define.side_effect = _mock_define
+    mock_add.side_effect = _mock_add
+    """The portability boundary. Uniform volumes run on any liquid handler; genuinely independent
+    per-channel volumes need one plunger per channel, which this pipette does not have."""
+    await self.lh.pick_up_tips(self.column)
+    for well in self.wells:
+      well.tracker.set_volume(100)
+    with self.assertRaises(ValueError):
+      await self.lh.aspirate(self.wells, vols=[10, 20, 30, 40, 50, 60, 70, 80])

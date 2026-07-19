@@ -61,8 +61,6 @@ _FLEX_MOTOR_AXES = frozenset(
 _FLEX_GRIPPER_MIN_FORCE = 2.0
 _FLEX_GRIPPER_MAX_FORCE = 30.0
 
-_NINETY_SIX_CHANNEL_COUNT = 96
-
 # The 96-channel nozzle grid is 12 columns x 8 rows at 9 mm pitch: a 99 mm span A1->A12 in x and a
 # 63 mm span A1->H1 in y. Used to center the head over a full-footprint container.
 _NINETY_SIX_HEAD_X_SPAN = (12 - 1) * 9
@@ -100,6 +98,19 @@ class OpentronsFlexBackend(OpentronsBackend):
     "flex_96channel_1000": 1000,
   }
 
+  pipette_name2channels = {
+    "p50_single_flex": 1,
+    "p50_multi_flex": 8,
+    "p1000_single_flex": 1,
+    "p1000_multi_flex": 8,
+    "p1000_96": 96,
+    "flex_1channel_50": 1,
+    "flex_8channel_50": 8,
+    "flex_1channel_1000": 1,
+    "flex_8channel_1000": 8,
+    "flex_96channel_1000": 96,
+  }
+
   def __init__(self, host: str, port: int = 31950):
     super().__init__(host, port)
     self._loaded_labware: Dict[str, str] = {}  # resource.name -> opentrons labware id
@@ -123,16 +134,13 @@ class OpentronsFlexBackend(OpentronsBackend):
     return self.left_pipette is not None and _is_96_channel(self.left_pipette["name"])
 
   @property
-  def num_channels(self) -> int:
-    """Mounted channel count. A 96-head reports 96, but it is one pipette driven as a unit: use the
-    *96 ops (aspirate96/dispense96/pick_up_tips96) or configure_nozzle_layout for partial columns,
-    not per-channel single ops (which only address channel 0, the whole head)."""
-    if self._has_96_head:
-      return _NINETY_SIX_CHANNEL_COUNT
-    return super().num_channels
-
-  @property
   def head96_installed(self) -> Optional[bool]:
+    """Whether a 96-channel pipette is mounted.
+
+    It contributes 96 nozzles to ``num_channels`` like any other pipette, but it is one unit of
+    volume control: drive it through the *96 ops (aspirate96/dispense96/pick_up_tips96), or
+    configure_nozzle_layout for partial columns.
+    """
     return self._has_96_head
 
   async def stop(self):
