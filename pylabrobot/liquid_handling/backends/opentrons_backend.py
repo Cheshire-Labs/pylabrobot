@@ -91,26 +91,33 @@ def _version_tuple(version: str) -> Tuple[int, ...]:
 
 class _IOLogger:
   """Transparent proxy over the ``ot_api`` module that logs every call at
-  ``LOG_LEVEL_IO``.
+  ``LOG_LEVEL_IO`` and re-targets ot_api to the owning backend before each call.
 
   Opentrons robots talk HTTP through ``ot_api`` rather than a pylabrobot.io transport, so
   this wrapper gives them the same wire-level logging every other backend gets from
   its io object. Submodules (``lh``, ``health``, ...) are wrapped recursively;
-  plain attributes (e.g. ``run_id``) pass through untouched.
+  plain attributes (e.g. ``run_id``) pass through untouched. ``ot_api`` keeps the target
+  robot (host, port, run_id) in module globals, so a process driving two robots would
+  have them clobber each other; re-pointing before every call keeps each backend on its
+  own robot. Safe without a lock: ot_api calls block the event loop, so retarget + call
+  run atomically with respect to another backend's calls.
   """
 
-  def __init__(self, target: Any, prefix: str = ""):
+  def __init__(self, target: Any, prefix: str = "", backend=None):
     self._target = target
     self._prefix = prefix
+    self._backend = backend
 
   def __getattr__(self, name: str) -> Any:
     attr = getattr(self._target, name)
     qualified = f"{self._prefix}.{name}" if self._prefix else name
     if inspect.ismodule(attr):
-      return _IOLogger(attr, qualified)
+      return _IOLogger(attr, qualified, backend=self._backend)
     if callable(attr):
 
       def _logged(*args, **kwargs):
+        if self._backend is not None:
+          self._backend._retarget_ot_api()
         parts = [repr(a) for a in args] + [f"{k}={v!r}" for k, v in kwargs.items()]
         logger.log(LOG_LEVEL_IO, "%s(%s)", qualified, ", ".join(parts))
         return attr(*args, **kwargs)
@@ -147,13 +154,11 @@ class OpentronsBackend(LiquidHandlerBackend):
 
     self.host = host
     self.port = port
+    self._run_id: Optional[str] = None
 
-    # A subclass (e.g. the chatterbox) can dry-run the backend by swapping this handle for a
-    # recording stand-in; the real handle wraps ot_api to log every HTTP call at LOG_LEVEL_IO.
-    self._ot: Any = _IOLogger(ot_api)
-
-    self._ot.set_host(host)
-    self._ot.set_port(port)
+    # A subclass (e.g. the chatterbox) swaps this handle for a recording stand-in; the real
+    # handle wraps ot_api to log each HTTP call and re-target host/port/run_id per call.
+    self._ot: Any = _IOLogger(ot_api, backend=self)
 
     self.ot_api_version: Optional[str] = None
     self.left_pipette: Optional[Dict[str, str]] = None
@@ -162,6 +167,14 @@ class OpentronsBackend(LiquidHandlerBackend):
     self.traversal_height = 120
     self._tip_racks: Dict[str, Union[int, str]] = {}  # tip_rack.name -> slot
     self._plr_name_to_load_name: Dict[str, str] = {}
+
+  def _retarget_ot_api(self) -> None:
+    """Point ot_api's module-global host/port/run_id at this backend so two
+    robots in one process do not clobber each other's target."""
+    ot_api.set_host(self.host)
+    ot_api.set_port(self.port)
+    if self._run_id is not None:
+      ot_api.set_run(self._run_id)
 
   def serialize(self) -> dict:
     return {
@@ -173,6 +186,7 @@ class OpentronsBackend(LiquidHandlerBackend):
   async def setup(self, skip_home: bool = False):
     # create run
     run_id = self._ot.runs.create()
+    self._run_id = run_id
     self._ot.set_run(run_id)
 
     # tell the robot which fixtures are on the deck (Flex requires this; OT-2 is a no-op)

@@ -844,3 +844,28 @@ class OpentronsFlexBackend(OpentronsBackend):
       },
     )
     self._pending_pickup = None
+
+  async def move_labware_off_deck(self, resource: Resource) -> None:
+    """Tell the robot-server a labware has left the deck, freeing its slot server-side.
+
+    An external transporter (not the Flex gripper) removed it, so this is a logical move
+    (``manualMoveWithoutPause``): the server drops it from its deck model with no gripper
+    motion. Without this the slot stays occupied server-side and a later moveLabware into it
+    fails with LocationIsOccupiedError. No-op if the labware was never loaded server-side;
+    forgets the load so a re-add loads fresh at its new slot.
+    """
+    name = resource.name
+    if name not in self._loaded_plates and name not in self._tip_racks and name not in self._loaded_labware:
+      return
+    self._run_command(
+      "moveLabware",
+      {
+        "labwareId": self.get_ot_name(name),
+        "newLocation": "offDeck",
+        "strategy": "manualMoveWithoutPause",
+      },
+    )
+    self._loaded_plates.discard(name)
+    self._tip_racks.pop(name, None)
+    self._loaded_labware.pop(name, None)
+    self._plr_name_to_load_name.pop(name, None)
