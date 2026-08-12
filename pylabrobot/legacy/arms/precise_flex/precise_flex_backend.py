@@ -114,14 +114,16 @@ class PreciseFlexBackend(SCARABackend, ABC):
     """Get the current speed percentage of the arm's movement."""
     return await self.get_profile_speed(self.profile_index)
 
-  async def open_gripper(self, gripper_width: float):
+  async def open_gripper(self, gripper_width: Optional[float] = None):
     """Open the gripper to the specified width. If no width is specified, opens to the default open position."""
-    await self._set_grip_open_pos(gripper_width)
+    if gripper_width is not None:
+      await self._set_grip_open_pos(gripper_width)
     await self.send_command("gripper 1")
 
-  async def close_gripper(self, gripper_width: float):
+  async def close_gripper(self, gripper_width: Optional[float] = None):
     """Close the gripper to the specified width. If no width is specified, closes to the default close position."""
-    await self._set_grip_close_pos(gripper_width)
+    if gripper_width is not None:
+      await self._set_grip_close_pos(gripper_width)
     await self.send_command("gripper 2")
 
   async def halt(self):
