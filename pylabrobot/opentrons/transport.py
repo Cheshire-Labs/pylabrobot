@@ -86,9 +86,10 @@ class ChatterboxTransport:
   """Offline transport: logs commands, returns canned 'succeeded' responses.
 
   Instead of reaching a robot server it returns the fixed ``/health``,
-  ``/instruments``, ``/runs`` and ``/runs/{id}/commands`` shapes the
-  ``OpentronsRobot`` lifecycle (``setup()``: health check, create-run,
-  discover pipette) reads, so a caller can drive the robot with no network.
+  ``/instruments``, ``/runs``, ``/runs/{id}/commands`` and
+  ``/runs/{id}/labware_definitions`` shapes the ``OpentronsRobot`` lifecycle
+  (``setup()``: health check, create-run, discover pipette) and labware
+  loading read, so a caller can drive the robot with no network.
 
   Scope: this exercises PLR-native checks only. It does NOT reproduce the
   Opentrons Protocol Engine's *analysis* stage (deck-conflict, capacity,
@@ -105,6 +106,9 @@ class ChatterboxTransport:
     log: Optional[Callable[..., None]] = None,
     simulate_failed_pickup: bool = False,
     simulate_stuck_tip: bool = False,
+    liquid_probe_z: Optional[float] = None,
+    gripper: bool = False,
+    saved_position: Optional[Dict[str, float]] = None,
   ) -> None:
     """Args:
     pipette: the simulated mounted pipette as ``(name, channels, min_vol, max_vol)``.
@@ -129,20 +133,34 @@ class ChatterboxTransport:
       stuck to the nozzle after a drop, so ``_FlexHead._confirm_tips_cleared()``
       sees ``tipDetected: True`` and logs a warning. Default False: a drop
       always clears the sensor (existing behavior).
+    liquid_probe_z: the liquid height (mm) a ``liquidProbe``/``tryLiquidProbe``
+      command reports as ``z_position`` in its result. Default None: the key
+      is omitted from the result entirely (not set to null), matching the
+      real robot-server's shape when no liquid is found.
+    gripper: if True, ``/instruments`` also reports a gripper on the extension
+      mount, so tests can drive gripper discovery. Default False: no gripper
+      mounted (existing behavior).
+    saved_position: the position a ``savePosition`` command reports in its
+      result, as an ``{"x", "y", "z"}`` dict. Default None: report
+      ``{"x": 100.0, "y": 100.0, "z": 100.0}``.
     """
     if pipettes is not None:
       self._pipettes: List[Tuple[str, int, float, float, str]] = list(pipettes)
     else:
       name, channels, min_v, max_v = pipette
       self._pipettes = [(name, channels, min_v, max_v, mount)]
+    self._gripper = gripper
     self._log = log or logger.info
     self._cmds: Dict[str, Dict[str, Any]] = {}  # cmd_id -> full command data
     self._n = 0
     self._pipette_load_count = 0
     self.load_pipette_commands: List[Dict[str, Any]] = []  # recorded loadPipette params
     self.commands: List[Dict[str, Any]] = []  # every command, in send order: {commandType, params}
+    self.labware_definitions: List[Dict[str, Any]] = []  # recorded custom definition uploads
     self.simulate_failed_pickup = simulate_failed_pickup
     self.simulate_stuck_tip = simulate_stuck_tip
+    self.liquid_probe_z = liquid_probe_z
+    self.saved_position = saved_position
     # Per-mount simulated hardware tip-presence sensor state (Flex reports
     # ONE bool per pipette, not per nozzle -- see /instruments below).
     self._tip_detected: Dict[str, bool] = {mount: False for *_rest, mount in self._pipettes}
@@ -154,19 +172,28 @@ class ChatterboxTransport:
     if path == "/health":
       return {"api_version": "dry-run", "robot_model": "OT-3 Standard", "name": "chatterbox"}
     if path == "/instruments":
-      return {
-        "data": [
+      instruments: List[Dict[str, Any]] = [
+        {
+          "instrumentType": "pipette",
+          "mount": mount,
+          "instrumentName": name,
+          "instrumentModel": name,
+          "data": {"channels": channels, "min_volume": min_v, "max_volume": max_v},
+          "state": {"tipDetected": self._tip_detected.get(mount, False)},
+        }
+        for name, channels, min_v, max_v, mount in self._pipettes
+      ]
+      if self._gripper:
+        instruments.append(
           {
-            "instrumentType": "pipette",
-            "mount": mount,
-            "instrumentName": name,
-            "instrumentModel": name,
-            "data": {"channels": channels, "min_volume": min_v, "max_volume": max_v},
-            "state": {"tipDetected": self._tip_detected.get(mount, False)},
+            "instrumentType": "gripper",
+            "mount": "extension",
+            "instrumentName": "flexGripper",
+            "instrumentModel": "gripperV1.3",
+            "data": {"jawState": "unhomed"},
           }
-          for name, channels, min_v, max_v, mount in self._pipettes
-        ]
-      }
+        )
+      return {"data": instruments}
     if "/commands/" in path:  # a poll for one command's status
       cmd_id = path.rsplit("/", 1)[-1]
       cmd_data = self._cmds.get(
@@ -178,6 +205,21 @@ class ChatterboxTransport:
   async def post(self, path: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if path == "/runs":
       return {"data": {"id": "chatterbox-run"}}
+    if path.endswith("/labware_definitions"):  # custom labware definition upload
+      definition = (json or {}).get("data", {})
+      self.labware_definitions.append(dict(definition))
+      # The real robot-server answers with the stored definition's URI, which
+      # the caller parses to reference the definition in loadLabware.
+      uri = "/".join(
+        str(part)
+        for part in (
+          definition.get("namespace"),
+          definition.get("parameters", {}).get("loadName"),
+          definition.get("version"),
+        )
+      )
+      self._log("Chatterbox: defineLabware %s", uri)
+      return {"data": {"definitionUri": uri}}
     if path.endswith("/commands"):
       data = (json or {}).get("data", {})
       ctype = data.get("commandType", "?")
@@ -185,6 +227,7 @@ class ChatterboxTransport:
       self._n += 1
       cmd_id = f"cmd-{self._n}"
       self.commands.append({"commandType": ctype, "params": dict(params)})
+      result: Dict[str, Any] = {}
       if ctype == "loadPipette":
         self._pipette_load_count += 1
         pipette_id = f"chatterbox-pip-{self._pipette_load_count}"
@@ -203,6 +246,12 @@ class ChatterboxTransport:
           mount = self._pipette_id_to_mount.get(params.get("pipetteId"))
           if mount is not None:
             self._tip_detected[mount] = self.simulate_stuck_tip
+        elif ctype in ("liquidProbe", "tryLiquidProbe"):
+          if self.liquid_probe_z is not None:
+            result = {"z_position": self.liquid_probe_z}
+        elif ctype == "savePosition":
+          pos = self.saved_position or {"x": 100.0, "y": 100.0, "z": 100.0}
+          result = {"position": dict(pos)}
       cmd_data = {"id": cmd_id, "commandType": ctype, "status": "succeeded", "result": result}
       self._cmds[cmd_id] = cmd_data
       self._log("Chatterbox: %s %s", ctype, params)
