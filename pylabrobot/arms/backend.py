@@ -51,12 +51,12 @@ class SCARABackend(MachineBackend, metaclass=ABCMeta):
   """Backend for a robotic arm"""
 
   @abstractmethod
-  async def open_gripper(self, gripper_width: float) -> None:
-    """Open the arm's gripper."""
+  async def open_gripper(self, gripper_width: Optional[float] = None) -> None:
+    """Open the arm's gripper. Without a width, use the arm's taught open position."""
 
   @abstractmethod
-  async def close_gripper(self, gripper_width: float) -> None:
-    """Close the arm's gripper."""
+  async def close_gripper(self, gripper_width: Optional[float] = None) -> None:
+    """Close the arm's gripper. Without a width, use the arm's taught close position."""
 
   @abstractmethod
   async def is_gripper_closed(self) -> bool:
