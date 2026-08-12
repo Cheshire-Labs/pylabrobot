@@ -5,16 +5,17 @@ from pylabrobot.resources.opentrons import FlexDeck
 
 
 class FlexDeckTests(unittest.TestCase):
-  def test_has_12_slots_with_trash_at_a3(self):
+  def test_has_16_slots_with_trash_at_a3(self):
+    # 12 standard slots A1-D3 plus the 4 column-4 staging slots.
     deck = FlexDeck()
-    self.assertEqual(len(deck.slots), 12)
+    self.assertEqual(len(deck.slots), 16)
     trash = deck.slots["A3"]
     assert trash is not None
     self.assertEqual(trash.name, "trash")
     self.assertIsNone(deck.slots["A1"])
 
   def test_with_trash_false_leaves_a3_empty(self):
-    deck = FlexDeck(with_trash=False)
+    deck = FlexDeck(with_trash_bin=False)
     self.assertIsNone(deck.slots["A3"])
 
   def test_trash_area_96_is_the_same_movable_bin(self):
