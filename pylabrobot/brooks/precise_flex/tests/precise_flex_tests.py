@@ -7,6 +7,7 @@ from pylabrobot.brooks.precise_flex import (
   OutOfRangeOfMotionError,
   PreciseFlex,
   PreciseFlexCartesianPose,
+  StationAccess,
 )
 from pylabrobot.events import EventBus, PLREvent, event_context, use_event_bus
 from pylabrobot.resources import Coordinate, Rotation
@@ -652,6 +653,20 @@ class TestPreciseFlexSingleAxisMoves(unittest.IsolatedAsyncioTestCase):
   Both verbs run through the guarded joint path, so a target outside the soft
   limits is refused here rather than by the controller.
   """
+class TestPreciseFlexStationAccess(unittest.IsolatedAsyncioTestCase):
+  """How the arm reaches a station is the caller's to set.
+
+  Labware does not agree on one geometry: a plate on an open pad wants a few mm
+  of allowance for the skirt, a hotel has to be entered from the side.
+  """
+
+  POSE: dict[int, float] = {
+    Axis.BASE: 50.0,
+    Axis.SHOULDER: 10.0,
+    Axis.ELBOW: 200.0,
+    Axis.WRIST: 90.0,
+    Axis.GRIPPER: 0.0,
+  }
 
   def setUp(self):
     self.arm = _make_arm()
@@ -715,3 +730,32 @@ class TestPreciseFlexMoveToSafe(unittest.IsolatedAsyncioTestCase):
     await self.arm.move_to_safe()
     sent = [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
     self.assertFalse([c for c in sent if c.startswith(("moveJ", "moveC"))], sent)
+
+  def _station_type_cmd(self) -> str:
+    sent = [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
+    return next(c for c in sent if c.startswith("StationType"))
+
+  async def test_default_keeps_the_previous_station_geometry(self):
+    # Callers that pass nothing keep what the driver used to hardcode.
+    await self.arm.pick_up_at_joint_position(self.POSE, resource_width=80.0)
+    self.assertEqual(self._station_type_cmd(), "StationType 1 1 0 100.0 0.0 10.0")
+
+  async def test_vertical_access_carries_its_own_clearance_and_grasp_offset(self):
+    await self.arm.pick_up_at_joint_position(
+      self.POSE, resource_width=80.0, access=StationAccess(clearance=20.0, grasp_offset=3.0)
+    )
+    self.assertEqual(self._station_type_cmd(), "StationType 1 1 0 20.0 0.0 3.0")
+
+  async def test_horizontal_access_flips_the_station_access_type(self):
+    await self.arm.pick_up_at_joint_position(
+      self.POSE,
+      resource_width=80.0,
+      access=StationAccess(approach="horizontal", clearance=50.0, z_above=15.0, grasp_offset=3.0),
+    )
+    self.assertEqual(self._station_type_cmd(), "StationType 1 0 0 50.0 15.0 3.0")
+
+  async def test_drop_carries_the_access_too(self):
+    await self.arm.drop_at_joint_position(
+      self.POSE, resource_width=80.0, access=StationAccess(clearance=20.0, grasp_offset=3.0)
+    )
+    self.assertEqual(self._station_type_cmd(), "StationType 1 1 0 20.0 0.0 3.0")

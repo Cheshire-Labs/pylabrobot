@@ -8,7 +8,7 @@ import warnings
 from typing import Callable, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence
 
 from pylabrobot.brooks.precise_flex import kinematics
-from pylabrobot.brooks.precise_flex.config import Axis, PreciseFlexConfiguration
+from pylabrobot.brooks.precise_flex.config import Axis, PreciseFlexConfiguration, StationAccess
 from pylabrobot.brooks.precise_flex.kinematics import JointPose
 from pylabrobot.events import coordinate_reference, emit_event, evented_operation
 from pylabrobot.io.socket import Socket
@@ -1379,9 +1379,13 @@ class PreciseFlex:
       raise ValueError(f"finger_speed_pct must be between 0 and 100, got {finger_speed_pct}")
     await self.send_command(f"GraspData {plate_width} {finger_speed_pct} {grasp_force}")
 
-  async def _set_grip_detail(self):
-    """Configure a default vertical station type for pick/place operations."""
-    await self.send_command(f"StationType {self.location_index} 1 0 100 0 10")
+  async def _set_grip_detail(self, access: Optional[StationAccess] = None):
+    """Tell the controller how to reach the pick/place station and back out of it."""
+    access = access or StationAccess()
+    await self.send_command(
+      f"StationType {self.location_index} {1 if access.approach == 'vertical' else 0} 0 "
+      f"{access.clearance} {access.z_above} {access.grasp_offset}"
+    )
 
   def _mm_to_firmware_units(self, width_mm: float) -> float:
     """Convert a jaw width (mm) to the firmware's native position unit.
@@ -2508,7 +2512,7 @@ class PreciseFlex:
 
   @evented_operation(
     "precise_flex.pick_up_at_joint_position",
-    lambda self, position, resource_width, finger_speed_pct=50.0, grasp_force=10.0: {
+    lambda self, position, resource_width, finger_speed_pct=50.0, grasp_force=10.0, access=None: {
       "device": _controller_reference(self),
       "target_joint_position": _joint_pose_reference(position),
       "resource_width": float(resource_width),
@@ -2522,6 +2526,7 @@ class PreciseFlex:
     resource_width: float,
     finger_speed_pct: float = 50.0,
     grasp_force: float = 10.0,
+    access: Optional[StationAccess] = None,
   ) -> None:
     """Pick up at the specified joint position.
 
@@ -2542,11 +2547,11 @@ class PreciseFlex:
       finger_speed_pct=finger_speed_pct,
       grasp_force=grasp_force,
     )
-    await self._pick_plate_j(position)
+    await self._pick_plate_j(position, access)
 
   @evented_operation(
     "precise_flex.drop_at_joint_position",
-    lambda self, position, resource_width: {
+    lambda self, position, resource_width, access=None: {
       "device": _controller_reference(self),
       "target_joint_position": _joint_pose_reference(position),
       "resource_width": float(resource_width),
@@ -2556,6 +2561,7 @@ class PreciseFlex:
     self,
     position: JointPose,
     resource_width: float,
+    access: Optional[StationAccess] = None,
   ) -> None:
     """Drop at the specified joint position.
 
@@ -2569,11 +2575,11 @@ class PreciseFlex:
       position,
       resource_width,
     )
-    await self._place_plate_j(position)
+    await self._place_plate_j(position, access)
 
   @evented_operation(
     "precise_flex.pick_up_at_location",
-    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, orientation=None, wrist=None, rail_position=None: {
+    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, orientation=None, wrist=None, rail_position=None, access=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
@@ -2597,6 +2603,7 @@ class PreciseFlex:
     orientation: Optional[ElbowOrientation] = None,
     wrist: Optional[Wrist] = None,
     rail_position: Optional[float] = None,
+    access: Optional[StationAccess] = None,
   ) -> None:
     """Pick up at the specified Cartesian location.
 
@@ -2610,6 +2617,8 @@ class PreciseFlex:
         picks the closest configuration.
       wrist: Wrist configuration. If None, the robot picks the closest configuration.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
+      access: How the arm reaches the station and backs out of it. Defaults to a
+        vertical approach with 100 mm clearance and 10 mm of allowance for the plate.
     """
     logger.info(
       "[PreciseFlex %s] pick_up: x=%s, y=%s, z=%s, direction=%s, resource_width_mm=%s",
@@ -2637,11 +2646,11 @@ class PreciseFlex:
       finger_speed_pct=finger_speed_pct,
       grasp_force=grasp_force,
     )
-    await self._pick_plate_c(cartesian_position=coords)
+    await self._pick_plate_c(cartesian_position=coords, access=access)
 
   @evented_operation(
     "precise_flex.drop_at_location",
-    lambda self, location, direction, resource_width, orientation=None, wrist=None, rail_position=None: {
+    lambda self, location, direction, resource_width, orientation=None, wrist=None, rail_position=None, access=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
@@ -2661,6 +2670,7 @@ class PreciseFlex:
     orientation: Optional[ElbowOrientation] = None,
     wrist: Optional[Wrist] = None,
     rail_position: Optional[float] = None,
+    access: Optional[StationAccess] = None,
   ) -> None:
     """Drop at the specified Cartesian location.
 
@@ -2672,6 +2682,8 @@ class PreciseFlex:
         picks the closest configuration.
       wrist: Wrist configuration. If None, the robot picks the closest configuration.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
+      access: How the arm reaches the station and backs out of it. Defaults to a
+        vertical approach with 100 mm clearance and 10 mm of allowance for the plate.
     """
     logger.info(
       "[PreciseFlex %s] drop: x=%s, y=%s, z=%s, direction=%s, resource_width_mm=%s",
@@ -2694,12 +2706,14 @@ class PreciseFlex:
       orientation=orientation,
       wrist=wrist,
     )
-    await self._place_plate_c(cartesian_position=coords)
+    await self._place_plate_c(cartesian_position=coords, access=access)
 
-  async def _pick_plate_j(self, joint_position: JointPose):
+  async def _pick_plate_j(
+    self, joint_position: JointPose, access: Optional[StationAccess] = None
+  ):
     """Pick a plate from the specified position using joint coordinates."""
     await self._set_joint_angles(self.location_index, joint_position)
-    await self._set_grip_detail()
+    await self._set_grip_detail(access)
     horizontal_compliance_int = 1 if self.horizontal_compliance else 0
     ret_code = await self.send_command(
       f"pickplate {self.location_index} {horizontal_compliance_int} {self.horizontal_compliance_torque}"
@@ -2707,24 +2721,32 @@ class PreciseFlex:
     if ret_code == "0":
       raise PreciseFlexError(-1, "the force-controlled gripper detected no plate present.")
 
-  async def _place_plate_j(self, joint_position: JointPose):
+  async def _place_plate_j(
+    self, joint_position: JointPose, access: Optional[StationAccess] = None
+  ):
     """Place a plate at the specified position using joint coordinates."""
     await self._set_joint_angles(self.location_index, joint_position)
-    await self._set_grip_detail()
+    await self._set_grip_detail(access)
     horizontal_compliance_int = 1 if self.horizontal_compliance else 0
     await self.send_command(
       f"placeplate {self.location_index} {horizontal_compliance_int} {self.horizontal_compliance_torque}"
     )
 
-  async def _pick_plate_c(self, cartesian_position: PreciseFlexCartesianPose):
+  async def _pick_plate_c(
+    self, cartesian_position: PreciseFlexCartesianPose,
+    access: Optional[StationAccess] = None,
+  ):
     """Pick a plate at a Cartesian position via IK + joint-space pickplate."""
     joints = await self._cart_to_joints(cartesian_position)
-    await self._pick_plate_j(joints)
+    await self._pick_plate_j(joints, access)
 
-  async def _place_plate_c(self, cartesian_position: PreciseFlexCartesianPose):
+  async def _place_plate_c(
+    self, cartesian_position: PreciseFlexCartesianPose,
+    access: Optional[StationAccess] = None,
+  ):
     """Place a plate at a Cartesian position via IK + joint-space placeplate."""
     joints = await self._cart_to_joints(cartesian_position)
-    await self._place_plate_j(joints)
+    await self._place_plate_j(joints, access)
 
   # -- parking ------------------------------------------------------------------------------
 
