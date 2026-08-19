@@ -36,19 +36,19 @@ def _make_arm(closed_gripper_position: float = 500.0) -> PreciseFlex:
 
 class TestPreciseFlex400Gripper(unittest.IsolatedAsyncioTestCase):
   def setUp(self):
-    # closed_gripper_position=500 ⇒ min_gripper_width(60mm) maps to 500 units.
+    # closed_gripper_position=500 â‡’ min_gripper_width(60mm) maps to 500 units.
     self.arm = _make_arm(closed_gripper_position=500.0)
 
   def _sent_commands(self) -> list[str]:
     return [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
 
   async def test_move_gripper_force_sensing_false_opens_with_position(self):
-    # 80 mm ⇒ 500 + (80 - 60) = 520 firmware units.
+    # 80 mm â‡’ 500 + (80 - 60) = 520 firmware units.
     await self.arm.move_gripper(width=80.0, force_sensing=False)
     self.assertEqual(self._sent_commands(), ["GripOpenPos 520.0", "gripper 1"])
 
   async def test_move_gripper_force_sensing_true_closes_with_position(self):
-    # 60 mm (the closed reference) ⇒ exactly closed_gripper_position.
+    # 60 mm (the closed reference) â‡’ exactly closed_gripper_position.
     await self.arm.move_gripper(width=60.0, force_sensing=True)
     self.assertEqual(self._sent_commands(), ["GripClosePos 500.0", "gripper 2"])
 
@@ -75,11 +75,11 @@ class TestPreciseFlex400Gripper(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(self.arm.max_gripper_width, 145.0)
 
   async def test_closed_gripper_position_shifts_units(self):
-    # Different anchor ⇒ same width yields a different firmware-unit target.
+    # Different anchor â‡’ same width yields a different firmware-unit target.
     arm = _make_arm(closed_gripper_position=1000.0)
     await arm.move_gripper(width=80.0, force_sensing=False)
     commands = [c.args[0] for c in mocked(arm.send_command).call_args_list]
-    # 80 mm ⇒ 1000 + (80 - 60) = 1020 units.
+    # 80 mm â‡’ 1000 + (80 - 60) = 1020 units.
     self.assertEqual(commands, ["GripOpenPos 1020.0", "gripper 1"])
 
   def test_mm_to_firmware_units_helper(self):
@@ -647,26 +647,14 @@ class TestPreciseFlexLifecycle(unittest.IsolatedAsyncioTestCase):
     self.arm.disconnect = AsyncMock()
     await self.arm.stop()
     mocked(self.arm.disconnect).assert_awaited_once()
+
+
 class TestPreciseFlexSingleAxisMoves(unittest.IsolatedAsyncioTestCase):
   """One axis moves and the rest hold their live values.
 
   Both verbs run through the guarded joint path, so a target outside the soft
   limits is refused here rather than by the controller.
   """
-class TestPreciseFlexStationAccess(unittest.IsolatedAsyncioTestCase):
-  """How the arm reaches a station is the caller's to set.
-
-  Labware does not agree on one geometry: a plate on an open pad wants a few mm
-  of allowance for the skirt, a hotel has to be entered from the side.
-  """
-
-  POSE: dict[int, float] = {
-    Axis.BASE: 50.0,
-    Axis.SHOULDER: 10.0,
-    Axis.ELBOW: 200.0,
-    Axis.WRIST: 90.0,
-    Axis.GRIPPER: 0.0,
-  }
 
   def setUp(self):
     self.arm = _make_arm()
@@ -715,6 +703,8 @@ class TestPreciseFlexStationAccess(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(ValueError):
       await self.arm.move_one_axis_relative(Axis.SHOULDER, 500.0)
     self.assertEqual(self._movej_cmds(), [])
+
+
 class TestPreciseFlexMoveToSafe(unittest.IsolatedAsyncioTestCase):
   """The controller's own safe retraction, reachable without going through park()."""
 
@@ -730,6 +720,26 @@ class TestPreciseFlexMoveToSafe(unittest.IsolatedAsyncioTestCase):
     await self.arm.move_to_safe()
     sent = [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
     self.assertFalse([c for c in sent if c.startswith(("moveJ", "moveC"))], sent)
+
+
+class TestPreciseFlexStationAccess(unittest.IsolatedAsyncioTestCase):
+  """How the arm reaches a station is the caller's to set.
+
+  Labware does not agree on one geometry: a plate on an open pad wants a few mm
+  of allowance for the skirt, a hotel has to be entered from the side.
+  """
+
+  POSE: dict[int, float] = {
+    Axis.BASE: 50.0,
+    Axis.SHOULDER: 10.0,
+    Axis.ELBOW: 200.0,
+    Axis.WRIST: 90.0,
+    Axis.GRIPPER: 0.0,
+  }
+
+  def setUp(self):
+    self.arm = _make_arm()
+    self.arm._wait_for_eom = AsyncMock()  # type: ignore[method-assign]
 
   def _station_type_cmd(self) -> str:
     sent = [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
