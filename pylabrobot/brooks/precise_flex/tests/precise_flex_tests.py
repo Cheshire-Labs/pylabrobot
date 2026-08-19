@@ -646,3 +646,57 @@ class TestPreciseFlexLifecycle(unittest.IsolatedAsyncioTestCase):
     self.arm.disconnect = AsyncMock()
     await self.arm.stop()
     mocked(self.arm.disconnect).assert_awaited_once()
+class TestPreciseFlexSingleAxisMoves(unittest.IsolatedAsyncioTestCase):
+  """One axis moves and the rest hold their live values.
+
+  Both verbs run through the guarded joint path, so a target outside the soft
+  limits is refused here rather than by the controller.
+  """
+
+  def setUp(self):
+    self.arm = _make_arm()
+    self.arm._wait_for_eom = AsyncMock()  # type: ignore[method-assign]
+    self.arm._configuration = MagicMock(
+      z_range=(0.0, 400.0),
+      soft_limits={
+        Axis.BASE: (0.0, 400.0),
+        Axis.SHOULDER: (-93.0, 93.0),
+        Axis.ELBOW: (12.0, 348.0),
+        Axis.WRIST: (-960.0, 960.0),
+      },
+    )
+    # wherej, no rail: base shoulder elbow wrist gripper
+    self.arm.send_command = AsyncMock(return_value="50 10 200 90 0")  # type: ignore[method-assign]
+
+  def _movej_cmds(self) -> list[str]:
+    return [
+      c.args[0]
+      for c in mocked(self.arm.send_command).call_args_list
+      if c.args[0].startswith("moveJ")
+    ]
+
+  async def test_move_one_axis_moves_only_that_axis(self):
+    await self.arm.move_one_axis(Axis.SHOULDER, 42.0)
+    # shoulder becomes 42; base/elbow/wrist/gripper carry from the live pose.
+    self.assertEqual(self._movej_cmds(), ["moveJ 1 50.0 42.0 200.0 90.0 0.0"])
+
+  async def test_move_one_axis_relative_offsets_from_the_live_position(self):
+    await self.arm.move_one_axis_relative(Axis.ELBOW, -20.0)
+    # elbow 200 - 20 = 180; everything else carries from the live pose.
+    self.assertEqual(self._movej_cmds(), ["moveJ 1 50.0 10.0 180.0 90.0 0.0"])
+
+  async def test_move_one_axis_uses_the_guarded_path_not_the_recovery_primitive(self):
+    # MoveOneAxis is the unguarded recovery primitive; a normal move must not use it.
+    await self.arm.move_one_axis(Axis.SHOULDER, 42.0)
+    sent = [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
+    self.assertFalse([c for c in sent if c.startswith("MoveOneAxis")], sent)
+
+  async def test_move_one_axis_refuses_a_target_outside_the_soft_limits(self):
+    with self.assertRaises(ValueError):
+      await self.arm.move_one_axis(Axis.SHOULDER, 200.0)
+    self.assertEqual(self._movej_cmds(), [])
+
+  async def test_move_one_axis_relative_refuses_an_offset_that_leaves_the_limits(self):
+    with self.assertRaises(ValueError):
+      await self.arm.move_one_axis_relative(Axis.SHOULDER, 500.0)
+    self.assertEqual(self._movej_cmds(), [])
