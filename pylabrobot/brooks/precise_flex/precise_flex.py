@@ -2062,6 +2062,49 @@ class PreciseFlex:
       await self._set_speed(speed_pct)
     await self._guarded_move_j(lambda current: {**current, **position})
 
+  async def move_one_axis(
+    self,
+    axis: Axis,
+    position: float,
+    speed_pct: Optional[float] = None,
+  ) -> None:
+    """Move one axis to an absolute position, leaving every other axis where it is.
+
+    Guarded like any other commanded move. Not to be confused with ``_move_one_axis``,
+    which skips the guard on purpose so it can recover an axis the controller has
+    already blocked.
+
+    Args:
+      axis: The axis to move.
+      position: Absolute target for that axis.
+      speed_pct: Movement speed override as a percentage (0-100). If None, uses the
+        current speed setting.
+    """
+    await self.move_to_joint_position({axis: position}, speed_pct=speed_pct)
+
+  async def move_one_axis_relative(
+    self,
+    axis: Axis,
+    distance: float,
+    speed_pct: Optional[float] = None,
+  ) -> None:
+    """Shift one axis by ``distance`` from where it is now, leaving the others alone.
+
+    The offset is applied to the pose read inside the guarded move rather than to a
+    position read beforehand, so it cannot act on a stale reading. If the first
+    attempt is blocked and recovery shifts the axis, the retry offsets from the
+    recovered position, which is what a relative move should mean.
+
+    Args:
+      axis: The axis to move.
+      distance: Signed offset to apply to that axis, in the axis's own units.
+      speed_pct: Movement speed override as a percentage (0-100). If None, uses the
+        current speed setting.
+    """
+    if speed_pct is not None:
+      await self._set_speed(speed_pct)
+    await self._guarded_move_j(lambda current: {**current, axis: current[axis] + distance})
+
   async def request_gripper_pose(self) -> PreciseFlexCartesianPose:
     """Get the current pose using our kinematics model (no firmware `wherec`)."""
     _, pose = await self._request_state()
