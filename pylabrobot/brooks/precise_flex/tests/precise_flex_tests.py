@@ -521,3 +521,20 @@ class TestPreciseFlex400AutoRecoverOnMove(unittest.IsolatedAsyncioTestCase):
         await self.arm.move_to_location(Coordinate(400.0, 0.0, 200.0), 0.0)
     self.assertIn(Axis.SHOULDER, ctx.exception.axes)
     self.assertEqual(self._cmds("moveJ"), [])
+
+
+class TestPreciseFlexMoveToSafe(unittest.IsolatedAsyncioTestCase):
+  """The controller's own safe retraction, reachable without going through park()."""
+
+  def setUp(self):
+    self.arm = _make_arm()
+
+  async def test_move_to_safe_hands_the_route_to_the_controller(self):
+    await self.arm.move_to_safe()
+    mocked(self.arm.send_command).assert_awaited_once_with("movetosafe")
+
+  async def test_move_to_safe_commands_no_joint_target(self):
+    # The controller plans the route, so the driver must not send joints of its own.
+    await self.arm.move_to_safe()
+    sent = [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
+    self.assertFalse([c for c in sent if c.startswith(("moveJ", "moveC"))], sent)

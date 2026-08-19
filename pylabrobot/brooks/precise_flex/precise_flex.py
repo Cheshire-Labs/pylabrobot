@@ -2698,6 +2698,16 @@ class PreciseFlex:
     else:
       await self.send_command("movetosafe")
 
+  async def move_to_safe(self) -> None:
+    """Run the controller's own retraction to its taught safe position.
+
+    This is the firmware ``movetosafe``: a sequence of safe moves the controller plans itself, not a
+    single joint target. The pose and the route live in the controller, so neither can be read back
+    or checked against the soft limits from here. ``park()`` is the counterpart this driver can
+    reason about. No collision checks against 3rd-party obstacles.
+    """
+    await self.send_command("movetosafe")
+
   def _validate_parking_position(self, position: JointPose) -> None:
     """Reject anything that is not a JointPose of in-range axes (limits checked once known)."""
     if not isinstance(position, dict) or not position:
