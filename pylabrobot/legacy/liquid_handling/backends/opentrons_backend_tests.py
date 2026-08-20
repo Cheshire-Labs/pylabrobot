@@ -1,3 +1,6 @@
+import asyncio
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -434,3 +437,94 @@ class OpentronsSharedHelperTests(unittest.TestCase):
     self.backend._set_tip_state("right-id", True)
     self.assertFalse(self.backend.left_pipette_has_tip)
     self.assertTrue(self.backend.right_pipette_has_tip)
+
+
+class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
+  """A robot that stops answering must not hang the process or freeze the event loop.
+
+  ``ot_api`` calls ``urlopen`` with no timeout, so an unanswered request blocks its
+  thread for good. These pin that the backend stops waiting on its own, and that the
+  rest of the process keeps running while it waits.
+  """
+
+  def _backend(self, **kwargs: float) -> OpentronsOT2Backend:
+    backend = OpentronsOT2Backend(host="localhost", port=1338, **kwargs)
+    backend.left_pipette = {"pipetteId": "left-pipette-id", "name": "p20_single_gen2"}
+    backend.right_pipette = None
+    return backend
+
+  @patch("ot_api.runs.get_command")
+  @patch("ot_api.runs.enqueue_command")
+  async def test_a_position_read_that_never_answers_fails_at_the_deadline(
+    self, mock_enqueue, mock_get_command
+  ):
+    mock_enqueue.return_value = "cmd-1"
+    released = threading.Event()
+    mock_get_command.side_effect = lambda *a, **kw: released.wait()
+
+    backend = self._backend(timeout=0.2)
+    started = time.monotonic()
+    try:
+      with self.assertRaises(RuntimeError) as caught:
+        await backend.get_channel_position(0)
+    finally:
+      released.set()  # let the abandoned thread finish, so the suite can exit
+
+    self.assertIsInstance(caught.exception.__cause__, TimeoutError)
+    self.assertLess(time.monotonic() - started, 5.0)
+
+  @patch("ot_api.runs.get_command")
+  @patch("ot_api.runs.enqueue_command")
+  async def test_a_slow_position_read_leaves_the_event_loop_free(
+    self, mock_enqueue, mock_get_command
+  ):
+    mock_enqueue.return_value = "cmd-1"
+
+    def slow_answer(*args, **kwargs):
+      time.sleep(0.3)
+      return {
+        "data": {"status": "succeeded", "result": {"position": {"x": 1.0, "y": 2.0, "z": 3.0}}}
+      }
+
+    mock_get_command.side_effect = slow_answer
+
+    ticks = 0
+
+    async def tick():
+      nonlocal ticks
+      while True:
+        await asyncio.sleep(0.01)
+        ticks += 1
+
+    ticker = asyncio.ensure_future(tick())
+    try:
+      position = await self._backend().get_channel_position(0)
+    finally:
+      ticker.cancel()
+
+    self.assertEqual(position, Coordinate(1.0, 2.0, 3.0))
+    self.assertGreater(ticks, 1)  # zero or one means the read blocked the loop
+
+  @patch("ot_api.health.home")
+  async def test_a_robot_command_gets_the_longer_budget(self, mock_home):
+    mock_home.side_effect = lambda *a, **kw: time.sleep(0.3)
+
+    # A move outlasts the plain request budget on purpose: it waits on the motion.
+    await self._backend(timeout=0.05, command_timeout=5.0).home()
+
+    mock_home.assert_called_once()
+
+  @patch("ot_api.modules.list_connected_modules")
+  async def test_a_plain_read_gets_the_shorter_budget(self, mock_list):
+    released = threading.Event()
+    mock_list.side_effect = lambda *a, **kw: released.wait()
+
+    backend = self._backend(timeout=0.2, command_timeout=60.0)
+    started = time.monotonic()
+    try:
+      with self.assertRaises(TimeoutError):
+        await backend.list_connected_modules()
+    finally:
+      released.set()
+
+    self.assertLess(time.monotonic() - started, 5.0)

@@ -1,8 +1,9 @@
+import asyncio
 import inspect
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 from pylabrobot import utils
 from pylabrobot.io import LOG_LEVEL_IO
@@ -44,8 +45,6 @@ except ImportError as e:
 # https://github.com/Opentrons/opentrons/issues/14590
 # https://labautomation.io/t/connect-pylabrobot-to-ot2/2862/18
 _OT_DECK_IS_ADDRESSABLE_AREA_VERSION = "7.1.0"
-
-_SAVE_POSITION_TIMEOUT = 30.0
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +99,22 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     "p1000_single_gen3": 1000,
   }
 
-  def __init__(self, host: str, port: int = 31950):
+  def __init__(
+    self,
+    host: str,
+    port: int = 31950,
+    timeout: float = 30.0,
+    command_timeout: float = 120.0,
+    status_poll_interval: float = 0.05,
+  ):
+    """Args:
+    host: the robot's address.
+    port: the robot-server's port.
+    timeout: how long one request/response with the robot may take, in seconds.
+    command_timeout: how long a command that moves the robot may take, in seconds.
+      Covers the motion itself plus the wait ``ot_api`` does inside the call.
+    status_poll_interval: delay between status polls while waiting, in seconds.
+    """
     super().__init__()
 
     if not USE_OT:
@@ -111,6 +125,10 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
 
     self.host = host
     self.port = port
+    self.timeout = timeout
+    self.command_timeout = command_timeout
+    self.status_poll_interval = status_poll_interval
+    self._request_lock = asyncio.Lock()
 
     # All hardware I/O goes through this handle so a subclass (e.g. the chatterbox)
     # can dry-run the backend by swapping it for a recording stand-in. The real handle
@@ -135,18 +153,43 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
       "port": self.port,
     }
 
+  async def _request(
+    self,
+    call: Callable[..., Any],
+    *args: Any,
+    timeout: Optional[float] = None,
+    **kwargs: Any,
+  ) -> Any:
+    """Issue one ``ot_api`` call off the event loop, and stop waiting after ``timeout``.
+
+    ``ot_api`` reaches the robot with ``urlopen`` and passes it no timeout, so an
+    unanswered request blocks the thread it runs on for good. Running it off the loop
+    keeps the rest of the process going, and the wait_for ends OUR wait: a thread
+    cannot be cancelled, so the abandoned one finishes on its own.
+
+    The lock keeps commands one at a time, which is what the blocking calls used to
+    give for free: the robot runs one queue and ``ot_api`` keeps the run id in a
+    module global.
+    """
+
+    async with self._request_lock:
+      return await asyncio.wait_for(
+        asyncio.to_thread(call, *args, **kwargs),
+        timeout=self.timeout if timeout is None else timeout,
+      )
+
   async def setup(self, skip_home: bool = False):
     # create run
-    run_id = self._ot.runs.create()
+    run_id = await self._request(self._ot.runs.create)
     self._ot.set_run(run_id)
 
     # get pipettes, then assign them
-    self.left_pipette, self.right_pipette = self._ot.lh.add_mounted_pipettes()
+    self.left_pipette, self.right_pipette = await self._request(self._ot.lh.add_mounted_pipettes)
 
     self.left_pipette_has_tip = self.right_pipette_has_tip = False
 
     # get api version
-    health = self._ot.health.get()
+    health = await self._request(self._ot.health.get)
     self.ot_api_version = health["api_version"]
 
     if not skip_home:
@@ -167,13 +210,13 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     run_id = getattr(self._ot, "run_id", None)
     if run_id:
       try:
-        self._ot.requestor.post(f"/runs/{run_id}/cancel")
+        await self._request(self._ot.requestor.post, f"/runs/{run_id}/cancel")
       except Exception:
         try:
-          self._ot.requestor.post(f"/runs/{run_id}/actions/cancel")
+          await self._request(self._ot.requestor.post, f"/runs/{run_id}/actions/cancel")
         except Exception:
           try:
-            self._ot.requestor.delete(f"/runs/{run_id}")
+            await self._request(self._ot.requestor.delete, f"/runs/{run_id}")
           except Exception:
             pass
 
@@ -271,7 +314,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
       ],
     }
 
-    data = self._ot.labware.define(lw)
+    data = await self._request(self._ot.labware.define, lw)
     namespace, definition, version = data["data"]["definitionUri"].split("/")
 
     # assign labware to robot
@@ -284,13 +327,15 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     slot = deck.get_slot(tip_rack)
     assert slot is not None, "tip rack must be on deck"
 
-    self._ot.labware.add(
+    await self._request(
+      self._ot.labware.add,
       load_name=definition,
       namespace=namespace,
       ot_location=slot,
       version=version,
       labware_id=labware_uuid,
       display_name=self.get_ot_name(tip_rack.name),
+      timeout=self.command_timeout,
     )
 
     self._tip_racks[tip_rack.name] = slot
@@ -363,13 +408,15 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
 
     offset_z += op.tip.total_tip_length
 
-    self._ot.lh.pick_up_tip(
+    await self._request(
+      self._ot.lh.pick_up_tip,
       labware_id=self.get_ot_name(tip_rack.name),
       well_name=self.get_ot_name(op.resource.name),
       pipette_id=pipette_id,
       offset_x=offset_x,
       offset_y=offset_y,
       offset_z=offset_z,
+      timeout=self.command_timeout,
     )
 
     self._set_tip_state(pipette_id, True)
@@ -403,21 +450,27 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     offset_z += 10
 
     if use_fixed_trash:
-      self._ot.lh.move_to_addressable_area_for_drop_tip(
+      await self._request(
+        self._ot.lh.move_to_addressable_area_for_drop_tip,
         pipette_id=pipette_id,
         offset_x=offset_x,
         offset_y=offset_y,
         offset_z=offset_z,
+        timeout=self.command_timeout,
       )
-      self._ot.lh.drop_tip_in_place(pipette_id=pipette_id)
+      await self._request(
+        self._ot.lh.drop_tip_in_place, pipette_id=pipette_id, timeout=self.command_timeout
+      )
     else:
-      self._ot.lh.drop_tip(
+      await self._request(
+        self._ot.lh.drop_tip,
         labware_id,
         well_name=self.get_ot_name(op.resource.name),
         pipette_id=pipette_id,
         offset_x=offset_x,
         offset_y=offset_y,
         offset_z=offset_z,
+        timeout=self.command_timeout,
       )
 
     self._set_tip_state(pipette_id, False)
@@ -512,21 +565,27 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
 
     if op.mix is not None:
       for _ in range(op.mix.repetitions):
-        self._ot.lh.aspirate_in_place(
+        await self._request(
+          self._ot.lh.aspirate_in_place,
           volume=op.mix.volume,
           flow_rate=op.mix.flow_rate,
           pipette_id=pipette_id,
+          timeout=self.command_timeout,
         )
-        self._ot.lh.dispense_in_place(
+        await self._request(
+          self._ot.lh.dispense_in_place,
           volume=op.mix.volume,
           flow_rate=op.mix.flow_rate,
           pipette_id=pipette_id,
+          timeout=self.command_timeout,
         )
 
-    self._ot.lh.aspirate_in_place(
+    await self._request(
+      self._ot.lh.aspirate_in_place,
       volume=volume,
       flow_rate=flow_rate,
       pipette_id=pipette_id,
+      timeout=self.command_timeout,
     )
 
     traversal_location = self._deck_to_robot_frame(
@@ -584,23 +643,29 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
       pipette_id=pipette_id,
     )
 
-    self._ot.lh.dispense_in_place(
+    await self._request(
+      self._ot.lh.dispense_in_place,
       volume=volume,
       flow_rate=flow_rate,
       pipette_id=pipette_id,
+      timeout=self.command_timeout,
     )
 
     if op.mix is not None:
       for _ in range(op.mix.repetitions):
-        self._ot.lh.aspirate_in_place(
+        await self._request(
+          self._ot.lh.aspirate_in_place,
           volume=op.mix.volume,
           flow_rate=op.mix.flow_rate,
           pipette_id=pipette_id,
+          timeout=self.command_timeout,
         )
-        self._ot.lh.dispense_in_place(
+        await self._request(
+          self._ot.lh.dispense_in_place,
           volume=op.mix.volume,
           flow_rate=op.mix.flow_rate,
           pipette_id=pipette_id,
+          timeout=self.command_timeout,
         )
 
     traversal_location = self._deck_to_robot_frame(
@@ -614,7 +679,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     )
 
   async def home(self):
-    self._ot.health.home()
+    await self._request(self._ot.health.home, timeout=self.command_timeout)
 
   async def pick_up_tips96(self, pickup: PickupTipRack):
     raise NotImplementedError("The Opentrons backend does not support the 96 head.")
@@ -641,7 +706,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
 
   async def list_connected_modules(self) -> List[dict]:
     """List all connected temperature modules."""
-    return cast(List[dict], self._ot.modules.list_connected_modules())
+    return cast(List[dict], await self._request(self._ot.modules.list_connected_modules))
 
   def _pipette_id_for_channel(self, channel: int) -> str:
     pipettes = []
@@ -653,34 +718,42 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
       raise NoChannelError(f"Channel {channel} not available on this OT-2 setup.")
     return pipettes[channel]
 
-  def _save_position(self, pipette_id: str) -> Dict[str, Any]:
+  async def _save_position(self, pipette_id: str) -> Dict[str, Any]:
     """Ask the robot where a pipette is, and wait for the answer.
 
     ``ot_api`` wraps no ``savePosition``, so this enqueues the command and polls it
-    the way ``ot_api``'s own command wrapper does.
+    itself rather than through ``ot_api``'s command decorator.
     """
 
-    command_id = self._ot.runs.enqueue_command(
-      "savePosition", {"pipetteId": pipette_id}, intent="setup"
+    deadline = time.monotonic() + self.timeout
+    command_id = await self._request(
+      self._ot.runs.enqueue_command,
+      "savePosition",
+      {"pipetteId": pipette_id},
+      intent="setup",
+      timeout=deadline - time.monotonic(),
     )
-    deadline = time.monotonic() + _SAVE_POSITION_TIMEOUT
-    while time.monotonic() < deadline:
-      result = self._ot.runs.get_command(command_id)
+    while True:
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        raise RuntimeError(f"savePosition timed out after {self.timeout}s")
+      result: Dict[str, Any] = await self._request(
+        self._ot.runs.get_command, command_id, timeout=remaining
+      )
       status = result["data"]["status"]
       if status == "failed":
         error = result["data"]["error"]
         raise RuntimeError(f"savePosition failed with {error['errorType']}: {error['detail']}")
       if status not in ("queued", "running"):
         return result
-      time.sleep(0.05)
-    raise RuntimeError("savePosition timed out")
+      await asyncio.sleep(self.status_poll_interval)
 
-  def _current_channel_position(self, channel: int) -> Tuple[str, Coordinate]:
+  async def _current_channel_position(self, channel: int) -> Tuple[str, Coordinate]:
     """Return the pipette id and current coordinate for a given channel."""
 
     pipette_id = self._pipette_id_for_channel(channel)
     try:
-      res = self._save_position(pipette_id)
+      res = await self._save_position(pipette_id)
       pos = res["data"]["result"]["position"]
       current = Coordinate(pos["x"], pos["y"], pos["z"])
     except Exception as exc:  # noqa: BLE001
@@ -696,7 +769,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
   async def get_channel_position(self, channel: int) -> Coordinate:
     """Where a channel is right now, in deck coordinates."""
 
-    _, current = self._current_channel_position(channel)
+    _, current = await self._current_channel_position(channel)
     return current
 
   async def move_channel_to(
@@ -713,7 +786,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     them.
     """
 
-    pipette_id, current = self._current_channel_position(channel)
+    pipette_id, current = await self._current_channel_position(channel)
     target = Coordinate(
       x=current.x if x is None else x,
       y=current.y if y is None else y,
@@ -726,7 +799,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
   async def move_channel_x(self, channel: int, x: float):
     """Move a channel to an absolute x coordinate using savePosition to seed pose."""
 
-    pipette_id, current = self._current_channel_position(channel)
+    pipette_id, current = await self._current_channel_position(channel)
     target = Coordinate(x=x, y=current.y, z=current.z)
     await self.move_pipette_head(
       location=target, minimum_z_height=self.traversal_height, pipette_id=pipette_id
@@ -735,7 +808,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
   async def move_channel_y(self, channel: int, y: float):
     """Move a channel to an absolute y coordinate using savePosition to seed pose."""
 
-    pipette_id, current = self._current_channel_position(channel)
+    pipette_id, current = await self._current_channel_position(channel)
     target = Coordinate(x=current.x, y=y, z=current.z)
     await self.move_pipette_head(
       location=target, minimum_z_height=self.traversal_height, pipette_id=pipette_id
@@ -744,7 +817,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
   async def move_channel_z(self, channel: int, z: float):
     """Move a channel to an absolute z coordinate using savePosition to seed pose."""
 
-    pipette_id, current = self._current_channel_position(channel)
+    pipette_id, current = await self._current_channel_position(channel)
     target = Coordinate(x=current.x, y=current.y, z=z)
     await self.move_pipette_head(
       location=target, minimum_z_height=self.traversal_height, pipette_id=pipette_id
@@ -779,7 +852,8 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     if pipette_id is None:
       raise ValueError("No pipette id given or left/right pipette not available.")
 
-    self._ot.lh.move_arm(
+    await self._request(
+      self._ot.lh.move_arm,
       pipette_id=pipette_id,
       location_x=location.x,
       location_y=location.y,
@@ -787,6 +861,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
       minimum_z_height=minimum_z_height,
       speed=speed,
       force_direct=force_direct,
+      timeout=self.command_timeout,
     )
 
   def can_pick_up_tip(self, channel_idx: int, tip: Tip) -> bool:

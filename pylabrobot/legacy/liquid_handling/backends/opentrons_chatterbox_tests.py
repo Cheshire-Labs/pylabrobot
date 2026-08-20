@@ -11,7 +11,7 @@ from pylabrobot.legacy.liquid_handling.backends import (
   OpentronsOT2ChatterboxBackend,
   OpentronsOT2Simulator,
 )
-from pylabrobot.resources import set_tip_tracking, set_volume_tracking
+from pylabrobot.resources import Coordinate, set_tip_tracking, set_volume_tracking
 from pylabrobot.resources.celltreat import CellTreat_96_wellplate_350ul_Fb
 from pylabrobot.resources.opentrons import OTDeck, opentrons_96_filtertiprack_20ul
 
@@ -48,6 +48,16 @@ class OpentronsChatterboxTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(self.backend.num_channels, 2)
     assert self.backend.left_pipette is not None and self.backend.right_pipette is not None
     self.assertEqual(self.backend.left_pipette["name"], "p20_single_gen2")
+
+  async def test_a_channel_reads_back_where_the_dry_run_last_moved_it(self):
+    """savePosition reports the recorded move, so a dry run can drive a channel."""
+    await self.backend.move_channel_to(0, x=50.0, y=60.0, z=70.0)
+
+    self.assertEqual(await self.backend.get_channel_position(0), Coordinate(50.0, 60.0, 70.0))
+
+    await self.backend.move_channel_x(0, x=15.0)
+
+    self.assertEqual(await self.backend.get_channel_position(0), Coordinate(15.0, 60.0, 70.0))
 
   async def test_full_protocol_records_one_wire_call_per_operation(self):
     """A pickup -> aspirate -> dispense -> trash-discard records exactly one

@@ -10,6 +10,7 @@ and volume bookkeeping, the per-operation wire calls) runs unchanged. Contrast
 with ``OpentronsOT2Simulator``, which overrides the high-level methods themselves.
 """
 
+import asyncio
 import logging
 from typing import Dict, List, Optional, Tuple, cast
 
@@ -56,9 +57,13 @@ class _OTChatterboxModule:
 
   Provides the sub-namespaces and reads the real backend touches: ``runs.create``,
   ``lh.add_mounted_pipettes``, ``health.get``, ``labware.define``,
-  ``modules.list_connected_modules`` and ``lh.save_position`` return canned data;
-  everything else is recorded and returns ``None``. ``run_id`` stays ``None`` so
-  ``stop()`` skips the cancel request.
+  ``modules.list_connected_modules`` and the ``savePosition`` command pair return
+  canned data; everything else is recorded and returns ``None``. ``run_id`` stays
+  ``None`` so ``stop()`` skips the cancel request.
+
+  A recorded ``lh.move_arm`` updates the position ``savePosition`` reports, so a
+  dry run that reads a channel back gets where it just sent it rather than the
+  origin every time.
   """
 
   def __init__(self, left_pipette, right_pipette, api_version: str, verbose: bool = True):
@@ -66,7 +71,19 @@ class _OTChatterboxModule:
     self.run_id: Optional[str] = None
     self._verbose = verbose
 
-    self.runs = _RecordingNamespace(self, "runs", {"create": lambda: "chatterbox-run"})
+    self.position: Dict[str, float] = {"x": 0.0, "y": 0.0, "z": 0.0}
+
+    self.runs = _RecordingNamespace(
+      self,
+      "runs",
+      {
+        "create": lambda: "chatterbox-run",
+        "enqueue_command": lambda: "chatterbox-command",
+        "get_command": lambda: {
+          "data": {"status": "succeeded", "result": {"position": dict(self.position)}}
+        },
+      },
+    )
     self.health = _RecordingNamespace(self, "health", {"get": lambda: {"api_version": api_version}})
     self.labware = _RecordingNamespace(
       self, "labware", {"define": lambda: {"data": {"definitionUri": "pylabrobot/chatterbox/1"}}}
@@ -76,10 +93,7 @@ class _OTChatterboxModule:
     self.lh = _RecordingNamespace(
       self,
       "lh",
-      {
-        "add_mounted_pipettes": lambda: (left_pipette, right_pipette),
-        "save_position": lambda: {"data": {"result": {"position": {"x": 0, "y": 0, "z": 0}}}},
-      },
+      {"add_mounted_pipettes": lambda: (left_pipette, right_pipette)},
     )
 
   def log(self, qualified: str, args: tuple, kwargs: dict):
@@ -90,6 +104,15 @@ class _OTChatterboxModule:
     logger.log(LOG_LEVEL_IO, "%s", rendered)
     if self._verbose:
       print(rendered)
+    if qualified == "lh.move_arm":
+      self._track_move(kwargs)
+
+  def _track_move(self, kwargs: dict) -> None:
+    """Follow a recorded move, so ``savePosition`` reports where the arm was sent."""
+    for axis in ("x", "y", "z"):
+      moved_to = kwargs.get(f"location_{axis}")
+      if moved_to is not None:
+        self.position[axis] = moved_to
 
   def __getattr__(self, name: str):
     # top-level functions the backend calls directly: set_host, set_port, set_run
@@ -126,6 +149,9 @@ class OpentronsOT2ChatterboxBackend(OpentronsOT2Backend):
     port: int = 31950,
     api_version: str = _OT_DECK_IS_ADDRESSABLE_AREA_VERSION,
     verbose: bool = True,
+    timeout: float = 30.0,
+    command_timeout: float = 120.0,
+    status_poll_interval: float = 0.05,
   ):
     """Initialize the chatterbox.
 
@@ -135,6 +161,9 @@ class OpentronsOT2ChatterboxBackend(OpentronsOT2Backend):
       api_version: reported Opentrons API version; defaults to the version at
         which tip drops route through the addressable-area trash.
       verbose: if True, print every recorded call.
+      timeout: how long one request/response with the robot may take, in seconds.
+      command_timeout: how long a command that moves the robot may take, in seconds.
+      status_poll_interval: delay between status polls while waiting, in seconds.
     """
     # Skip OpentronsOT2Backend.__init__ (it requires ot_api); set up state directly.
     LiquidHandlerBackend.__init__(self)
@@ -149,6 +178,10 @@ class OpentronsOT2ChatterboxBackend(OpentronsOT2Backend):
     self._right_pipette_name = right_pipette_name
     self.host = host
     self.port = port
+    self.timeout = timeout
+    self.command_timeout = command_timeout
+    self.status_poll_interval = status_poll_interval
+    self._request_lock = asyncio.Lock()
 
     left = (
       {"name": left_pipette_name, "pipetteId": "chatterbox-left"} if left_pipette_name else None
