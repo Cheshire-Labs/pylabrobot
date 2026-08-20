@@ -103,7 +103,7 @@ class PreciseFlexConfiguration:
   reach_class: Literal["standard", "extended", "unknown"] = "extended"
 
   @property
-  def gripper_axis_limits(self) -> tuple:
+  def gripper_axis_limits(self) -> tuple[float, float]:
     """Travel limits of the gripper axis, in the controller's own units.
 
     Not millimetres: a jaw width reaches these through

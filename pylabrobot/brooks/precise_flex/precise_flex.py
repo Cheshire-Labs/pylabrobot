@@ -5,6 +5,7 @@ import dataclasses
 import logging
 import time
 import warnings
+from math import hypot
 from typing import Callable, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence
 
 from pylabrobot.brooks.precise_flex import kinematics
@@ -24,10 +25,17 @@ from .confirmed_firmware_versions import (
 from .data_ids import DataID, PowerState
 from .errors import OutOfRangeOfMotionError, PreciseFlexError
 from .interrupt import halt_and_resync, halt_on_interrupt
-from .kinematics import ElbowOrientation, PreciseFlexCartesianPose, Wrist
+from .kinematics import ElbowOrientation, IKError, PreciseFlexCartesianPose, Wrist
 from .tcs_modules import missing_required_modules
 
 logger = logging.getLogger(__name__)
+
+# Float dust allowed when a converted jaw width is compared with the axis limit it
+# was derived from.
+_GRIPPER_UNIT_EPS = 1e-6
+
+# Type code `loc` reports for a Cartesian station location; 1 is an angles location.
+_LOCATION_TYPE_CARTESIAN = 0
 
 
 # InRange sentinel that lets the controller blend through waypoints instead of stopping at each one.
@@ -207,6 +215,9 @@ class PreciseFlex:
     self._has_rail = has_rail
     self._is_dual_gripper = is_dual_gripper
     self.closed_gripper_position = closed_gripper_position
+    # closed_gripper_position was calibrated against whatever min_gripper_width read
+    # when it was measured, so that width is the anchor and discovery must not move it.
+    self._anchor_width_mm = self.min_gripper_width
     self._kinematics_params = kinematics.PF400Params(
       gripper_length=gripper_length, gripper_z_offset=gripper_z_offset
     )
@@ -771,35 +782,7 @@ class PreciseFlex:
     """
     await self.send_command(f"MoveOneAxis {int(axis)} {position} {self.profile_index}")
 
-  async def _move_to_stored_location(self, location_index: int, profile_index: int) -> None:
-    """Move to the location specified by the station index using the specified profile.
-
-    Args:
-      location_index: The index of the location to which the robot moves.
-      profile_index: The profile index for this move.
-
-    Note:
-      Requires that the robot be attached.
-    """
-    await self.send_command(f"move {location_index} {profile_index}")
-
-  async def _move_to_stored_location_appro(self, location_index: int, profile_index: int) -> None:
-    """Approach the location specified by the station index using the specified profile.
-
-    This is similar to `_move_to_stored_location` except that the Z clearance value is included.
-
-    Args:
-      location_index: The index of the location to which the robot moves.
-      profile_index: The profile index for this move.
-
-    Note:
-      Requires that the robot be attached.
-    """
-    await self.send_command(f"moveAppro {location_index} {profile_index}")
-
-  # PARobot's pick and place read the station's CARTESIAN location (`TeachPlate`
-  # stores one), so a station written with `locAngles` leaves them reading a
-  # location we never set.
+  # Station Config bits (GPL_Righty / GPL_Lefty). 0 leaves the branch unspecified.
   _CONFIG_NONE = 0
   _CONFIG_RIGHTY = 0x01
   _CONFIG_LEFTY = 0x02
@@ -809,12 +792,48 @@ class PreciseFlex:
     location_index: int,
     pose: PreciseFlexCartesianPose,
   ) -> None:
-    """Write a station's Cartesian location: `locXyz <station> X Y Z yaw pitch roll`."""
+    """Write a station's Cartesian location and confirm the controller kept it that way.
+
+    The station table is persistent controller state, so a station an earlier driver
+    wrote with `locAngles` is an angles location until something changes its type. The
+    vendor documents a type change for `HereJ`, `HereC` and `TeachPlate` but not for
+    `locXyz`, and a pick against a station of the wrong type reads coordinates nobody
+    set. Cheaper to read the type back than to find out by watching the arm.
+    """
     await self.send_command(
       f"locXyz {location_index} "
       f"{pose.location.x} {pose.location.y} {pose.location.z} "
       f"{pose.rotation.yaw} {pose.rotation.pitch} {pose.rotation.roll}"
     )
+    reply = await self.send_command(f"loc {location_index}")
+    if reply.split()[:1] != [str(_LOCATION_TYPE_CARTESIAN)]:
+      raise PreciseFlexError(
+        -1,
+        f"station {location_index} did not take a Cartesian location (loc returned "
+        f"{reply!r}); pick and place read the station's Cartesian coordinates, so this "
+        f"station has to be retaught, e.g. with TeachPlate.",
+      )
+
+  def _assert_within_work_envelope(self, location: Coordinate, rail_position: float) -> None:
+    """Refuse an unreachable station before the controller starts moving toward it.
+
+    The controller-run pick has no pre-flight of its own, so without this an
+    out-of-reach target faults part way through a motion instead of failing on the call.
+    """
+    if self._configuration is None:
+      return
+    envelope = self._configuration.work_envelope
+    reach = hypot(location.x - rail_position, location.y)
+    if not envelope.inner <= reach <= envelope.outer:
+      raise IKError(
+        f"target at reach {reach:.1f} mm is outside the arm's annulus "
+        f"[{envelope.inner:.1f}, {envelope.outer:.1f}]"
+      )
+    if not envelope.zmin <= location.z <= envelope.zmax:
+      raise IKError(
+        f"target z={location.z} is outside the arm's Z travel "
+        f"[{envelope.zmin}, {envelope.zmax}]"
+      )
 
   async def _set_location_config(
     self,
@@ -826,8 +845,8 @@ class PreciseFlex:
     Always written: one station index is reused for every pick and place, so an
     unwritten Config keeps whatever the previous operation left there.
 
-    Deliberately no GPL_Single (0x1000): it restricts the wrist to +/-180, and
-    this arm's taught poses sit near -300.
+    Deliberately no GPL_Single (0x1000): it restricts the wrist to +/-180, and PF400
+    poses are routinely taught past a full half turn.
     """
     config = {
       "right": self._CONFIG_RIGHTY,
@@ -1403,10 +1422,10 @@ class PreciseFlex:
   def _mm_to_firmware_units(self, width_mm: float) -> float:
     """Convert a jaw width (mm) to the firmware's native position unit.
 
-    Anchored at :attr:`closed_gripper_position`, which is the firmware value
-    when the jaws are at :attr:`min_gripper_width`. Slope is 1 (1 mm = 1 unit).
+    Anchored on the construction-time calibration pair, so a given width commands the
+    same jaw travel whether or not setup has discovered the axis limits. Slope is 1.
     """
-    return self.closed_gripper_position + (width_mm - self.min_gripper_width)
+    return self.closed_gripper_position + (width_mm - self._anchor_width_mm)
 
   # -- rail primitives ----------------------------------------------------------------------
 
@@ -1766,10 +1785,10 @@ class PreciseFlex:
     """
     gmin, gmax = config.gripper_axis_limits
     self._gripper_soft_min, self._gripper_soft_max = gmin, gmax
-    # Widths reach the axis through closed_gripper_position, so the top of the
-    # travel has to be converted; copying it strands whatever the anchor offsets.
-    self.min_gripper_width = gmin
-    self.max_gripper_width = gmin + (gmax - self.closed_gripper_position)
+    # The limits are gripper-axis units. Both ends convert through the anchor: copying
+    # them in would put units in a millimetre field and change what a width means.
+    self.min_gripper_width = self._anchor_width_mm + (gmin - self.closed_gripper_position)
+    self.max_gripper_width = self._anchor_width_mm + (gmax - self.closed_gripper_position)
     self._kinematics_params = config.kinematics
     self._has_rail = config.has_rail
     self._is_dual_gripper = config.is_dual_gripper
@@ -2399,8 +2418,8 @@ class PreciseFlex:
 
   # -- gripper ------------------------------------------------------------------------------
 
-  # Physical jaw range for the PF400 servoed gripper. Overridden at setup from the
-  # gripper-axis soft limits (DataIDs 16078/16077, Axis.GRIPPER) when discoverable.
+  # Physical jaw range for the PF400 servoed gripper. The minimum doubles as the
+  # calibration anchor for closed_gripper_position; setup converts both ends off it.
   min_gripper_width: float = 60.0
   max_gripper_width: float = 145.0
   # Gripper-axis soft limits (GripOpenPos/GripClosePos units), read at setup; None until then.
@@ -2438,16 +2457,20 @@ class PreciseFlex:
       force_sensing,
     )
     units = self._mm_to_firmware_units(width)
-    if (
-      self._gripper_soft_min is not None
-      and self._gripper_soft_max is not None
-      and not (self._gripper_soft_min <= units <= self._gripper_soft_max)
-    ):
-      raise ValueError(
-        f"gripper width {width} mm maps to firmware units {units:.1f}, outside the gripper "
-        f"axis range [{self._gripper_soft_min}, {self._gripper_soft_max}] - check "
-        f"closed_gripper_position (currently {self.closed_gripper_position})."
-      )
+    if self._gripper_soft_min is not None and self._gripper_soft_max is not None:
+      # An advertised end converts back through a subtract and an add, so it can land a
+      # few ulps outside the limit it was derived from. That is dust, not out of range.
+      if not (
+        self._gripper_soft_min - _GRIPPER_UNIT_EPS
+        <= units
+        <= self._gripper_soft_max + _GRIPPER_UNIT_EPS
+      ):
+        raise ValueError(
+          f"gripper width {width} mm maps to firmware units {units:.1f}, outside the gripper "
+          f"axis range [{self._gripper_soft_min}, {self._gripper_soft_max}] - check "
+          f"closed_gripper_position (currently {self.closed_gripper_position})."
+        )
+      units = min(max(units, self._gripper_soft_min), self._gripper_soft_max)
     if force_sensing:
       await self._set_grip_close_pos(units)
       await self.send_command("gripper 2")
@@ -2527,81 +2550,13 @@ class PreciseFlex:
   # -- pick & place -------------------------------------------------------------------------
 
   @evented_operation(
-    "precise_flex.pick_up_at_joint_position",
-    lambda self, position, resource_width, finger_speed_pct=50.0, grasp_force=10.0: {
-      "device": _controller_reference(self),
-      "target_joint_position": _joint_pose_reference(position),
-      "resource_width": float(resource_width),
-      "finger_speed_pct": float(finger_speed_pct),
-      "grasp_force": float(grasp_force),
-    },
-  )
-  async def pick_up_at_joint_position(
-    self,
-    position: JointPose,
-    resource_width: float,
-    finger_speed_pct: float = 50.0,
-    grasp_force: float = 10.0,
-    access: Optional[StationAccess] = None,
-  ) -> None:
-    """Pick up at the specified joint position.
-
-    Args:
-      position: Joint pose to pick from.
-      resource_width: Width of the resource to grasp, in mm.
-      finger_speed_pct: Finger closing speed as a percentage (0-100).
-      grasp_force: Grasp force in Newtons.
-    """
-    logger.info(
-      "[PreciseFlex %s] pick_up: joints=%s, resource_width_mm=%s",
-      self.io._host,
-      position,
-      resource_width,
-    )
-    await self._set_grasp_data(
-      plate_width=resource_width,
-      finger_speed_pct=finger_speed_pct,
-      grasp_force=grasp_force,
-    )
-    await self._pick_plate_j(position, access)
-
-  @evented_operation(
-    "precise_flex.drop_at_joint_position",
-    lambda self, position, resource_width: {
-      "device": _controller_reference(self),
-      "target_joint_position": _joint_pose_reference(position),
-      "resource_width": float(resource_width),
-    },
-  )
-  async def drop_at_joint_position(
-    self,
-    position: JointPose,
-    resource_width: float,
-    access: Optional[StationAccess] = None,
-  ) -> None:
-    """Drop at the specified joint position.
-
-    Args:
-      position: Joint pose to drop at.
-      resource_width: Width of the held resource, in mm.
-    """
-    logger.info(
-      "[PreciseFlex %s] drop: joints=%s, resource_width_mm=%s",
-      self.io._host,
-      position,
-      resource_width,
-    )
-    await self._place_plate_j(position, access)
-
-  @evented_operation(
     "precise_flex.pick_up_at_location",
-    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, orientation=None, wrist=None, rail_position=None: {
+    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, orientation=None, rail_position=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
         direction,
         orientation=orientation,
-        wrist=wrist,
         rail_position=rail_position,
       ),
       "resource_width": float(resource_width),
@@ -2617,11 +2572,14 @@ class PreciseFlex:
     finger_speed_pct: float = 50.0,
     grasp_force: float = 10.0,
     orientation: Optional[ElbowOrientation] = None,
-    wrist: Optional[Wrist] = None,
     rail_position: Optional[float] = None,
     access: Optional[StationAccess] = None,
   ) -> None:
     """Pick up at the specified Cartesian location.
+
+    The controller solves the pose and runs the approach, so the wrist branch is its
+    choice: a station carries an elbow configuration and has nowhere to record which way
+    a level wrist turned.
 
     Args:
       location: Cartesian location to pick from.
@@ -2629,9 +2587,9 @@ class PreciseFlex:
       resource_width: Width of the resource to grasp, in mm.
       finger_speed_pct: Finger closing speed as a percentage (0-100).
       grasp_force: Grasp force in Newtons.
-      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). If None, the robot
-        picks the closest configuration.
-      wrist: Wrist configuration. If None, the robot picks the closest configuration.
+      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). Pins the station's
+        configuration, so passing one while the arm sits on the other elbow sends the
+        pick via the park position. None leaves the branch to the controller.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
       access: How the arm reaches the station and backs out of it. Defaults to a
         vertical approach with 100 mm clearance and 10 mm of allowance for the plate.
@@ -2651,11 +2609,11 @@ class PreciseFlex:
       raise ValueError(
         "rail_position must be specified for pick_up_at_location when using a rail-equipped arm."
       )
+    self._assert_within_work_envelope(location, rail_position or 0.0)
     coords = PreciseFlexCartesianPose(
       location=location,
       rotation=Rotation(x=-180, y=90, z=direction),
       orientation=orientation,
-      wrist=wrist,
     )
     await self._set_grasp_data(
       plate_width=resource_width,
@@ -2666,49 +2624,47 @@ class PreciseFlex:
 
   @evented_operation(
     "precise_flex.drop_at_location",
-    lambda self, location, direction, resource_width, orientation=None, wrist=None, rail_position=None: {
+    lambda self, location, direction, orientation=None, rail_position=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
         direction,
         orientation=orientation,
-        wrist=wrist,
         rail_position=rail_position,
       ),
-      "resource_width": float(resource_width),
     },
   )
   async def drop_at_location(
     self,
     location: Coordinate,
     direction: float,
-    resource_width: float,
     orientation: Optional[ElbowOrientation] = None,
-    wrist: Optional[Wrist] = None,
     rail_position: Optional[float] = None,
     access: Optional[StationAccess] = None,
   ) -> None:
     """Drop at the specified Cartesian location.
 
+    Takes no resource width: the grip is established by the time a plate is being placed,
+    and GraspData feeds the pick alone. The wrist branch is the controller's choice, as
+    for a pick.
+
     Args:
       location: Cartesian location to drop at.
       direction: Approach direction, applied as the pose's z rotation in degrees.
-      resource_width: Width of the held resource, in mm.
-      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). If None, the robot
-        picks the closest configuration.
-      wrist: Wrist configuration. If None, the robot picks the closest configuration.
+      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). Pins the station's
+        configuration, so passing one while the arm sits on the other elbow sends the
+        place via the park position. None leaves the branch to the controller.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
       access: How the arm reaches the station and backs out of it. Defaults to a
         vertical approach with 100 mm clearance and 10 mm of allowance for the plate.
     """
     logger.info(
-      "[PreciseFlex %s] drop: x=%s, y=%s, z=%s, direction=%s, resource_width_mm=%s",
+      "[PreciseFlex %s] drop: x=%s, y=%s, z=%s, direction=%s",
       self.io._host,
       location.x,
       location.y,
       location.z,
       direction,
-      resource_width,
     )
     if rail_position is not None:
       await self.move_rail(rail_position)
@@ -2716,11 +2672,11 @@ class PreciseFlex:
       raise ValueError(
         "rail_position must be specified for drop_at_location when using a rail-equipped arm."
       )
+    self._assert_within_work_envelope(location, rail_position or 0.0)
     coords = PreciseFlexCartesianPose(
       location=location,
       rotation=Rotation(x=-180, y=90, z=direction),
       orientation=orientation,
-      wrist=wrist,
     )
     await self._place_plate_c(cartesian_position=coords, access=access)
 
@@ -2739,18 +2695,6 @@ class PreciseFlex:
     await self.send_command(
       f"placeplate {self.location_index} {horizontal_compliance_int} {self.horizontal_compliance_torque}"
     )
-
-  async def _pick_plate_j(
-    self, joint_position: JointPose, access: Optional[StationAccess] = None
-  ):
-    """Pick a plate from a joint pose, forward-solved into the station's Cartesian location."""
-    await self._pick_plate_c(kinematics.fk(joint_position, self._kinematics_params), access)
-
-  async def _place_plate_j(
-    self, joint_position: JointPose, access: Optional[StationAccess] = None
-  ):
-    """Place a plate at a joint pose, forward-solved into the station's Cartesian location."""
-    await self._place_plate_c(kinematics.fk(joint_position, self._kinematics_params), access)
 
   async def _pick_plate_c(
     self, cartesian_position: PreciseFlexCartesianPose,

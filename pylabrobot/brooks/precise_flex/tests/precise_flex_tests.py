@@ -4,10 +4,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from pylabrobot.brooks.precise_flex import (
   Axis,
+  IKError,
   OutOfRangeOfMotionError,
   PreciseFlex,
   PreciseFlexCartesianPose,
+  PreciseFlexError,
   StationAccess,
+  WorkEnvelope,
 )
 from pylabrobot.events import EventBus, PLREvent, event_context, use_event_bus
 from pylabrobot.resources import Coordinate, Rotation
@@ -22,15 +25,31 @@ def mocked(method: object) -> AsyncMock:
   return cast(AsyncMock, method)
 
 
-def _make_arm(closed_gripper_position: float = 500.0) -> PreciseFlex:
-  """An arm whose transport is stubbed out, so tests assert on the commands it would send."""
+_PAD_1 = Coordinate(329.9, 80.29, 40.48)
+
+_CARTESIAN_STATION_REPLY = "0 1 329.9 80.29 40.48 2.03 90 -180"
+
+
+def _make_arm(
+  closed_gripper_position: float = 500.0,
+  loc_reply: str = _CARTESIAN_STATION_REPLY,
+) -> PreciseFlex:
+  """An arm whose transport is stubbed out, so tests assert on the commands it would send.
+
+  `loc` answers with a station type code because the station writer reads the type back;
+  a blanket empty reply would make every pick look like it landed on an angles location.
+  """
   arm = PreciseFlex(
     host="localhost",
     gripper_length=162.0,
     gripper_z_offset=0.0,
     closed_gripper_position=closed_gripper_position,
   )
-  arm.send_command = AsyncMock(return_value="")  # type: ignore[method-assign]
+
+  async def reply(command: str) -> str:
+    return loc_reply if command.startswith("loc ") else ""
+
+  arm.send_command = AsyncMock(side_effect=reply)  # type: ignore[method-assign]
   return arm
 
 
@@ -90,11 +109,11 @@ class TestPreciseFlex400Gripper(unittest.IsolatedAsyncioTestCase):
 
 
 class TestGripperWidthsAdoptedFromSoftLimits(unittest.IsolatedAsyncioTestCase):
-  """The advertised widths must be commandable on the arm that reported them.
+  """A width has to mean the same jaw travel before and after the axis limits are read.
 
-  Bench numbers: the gripper axis reports soft limits [69.0, 134.0] and the
-  fitted gripper closes at 75.5. The two differ, which is the case that used to
-  strand the top of the range.
+  Bench numbers: the gripper axis reports [69.0, 134.0] and the fitted gripper closes at
+  75.5. The two differ, which is the case that used to strand the top of the range and
+  shift every width underneath it.
   """
 
   AXIS_MIN, AXIS_MAX = 69.0, 134.0
@@ -102,32 +121,48 @@ class TestGripperWidthsAdoptedFromSoftLimits(unittest.IsolatedAsyncioTestCase):
 
   def setUp(self):
     self.arm = _make_arm(closed_gripper_position=self.CLOSED_AT)
+
+  def _discover(self, arm=None, limits=None):
     discovered = MagicMock()
-    discovered.gripper_axis_limits = (self.AXIS_MIN, self.AXIS_MAX)
+    discovered.gripper_axis_limits = limits or (self.AXIS_MIN, self.AXIS_MAX)
     discovered.has_rail = False
     discovered.is_dual_gripper = False
-    self.arm._adopt_configuration(discovered)
+    (arm or self.arm)._adopt_configuration(discovered)
 
-  def _sent(self) -> list[str]:
-    return [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
+  def _sent(self, arm=None) -> list[str]:
+    return [c.args[0] for c in mocked((arm or self.arm).send_command).call_args_list]
 
-  async def test_opening_to_the_advertised_max_is_accepted(self):
+  async def test_a_width_commands_the_same_travel_before_and_after_discovery(self):
+    await self.arm.move_gripper(80.0, force_sensing=False)
+    before = self._sent()
+    self._discover()
+    await self.arm.move_gripper(80.0, force_sensing=False)
+    after = self._sent()[len(before) :]
+    self.assertEqual(before[0], after[0], "discovery moved what 80 mm means")
+
+  async def test_opening_to_the_advertised_max_reaches_the_axis_ceiling(self):
+    self._discover()
     await self.arm.move_gripper(self.arm.max_gripper_width, force_sensing=False)
     self.assertIn(f"GripOpenPos {self.AXIS_MAX}", self._sent())
 
-  async def test_closing_to_the_advertised_min_is_accepted(self):
+  async def test_closing_to_the_advertised_min_reaches_the_axis_floor(self):
+    self._discover()
     await self.arm.move_gripper(self.arm.min_gripper_width, force_sensing=True)
-    self.assertIn(f"GripClosePos {self.CLOSED_AT}", self._sent())
+    self.assertIn(f"GripClosePos {self.AXIS_MIN}", self._sent())
 
-  def test_advertised_widths_map_inside_the_axis_range(self):
-    for width in (self.arm.min_gripper_width, self.arm.max_gripper_width):
-      units = self.arm._mm_to_firmware_units(width)
-      self.assertGreaterEqual(units, self.AXIS_MIN)
-      self.assertLessEqual(units, self.AXIS_MAX)
+  async def test_an_advertised_end_survives_its_own_float_round_trip(self):
+    # Limits that are not halves: the reconverted ceiling lands a few ulps out, and the
+    # guard has to read that as float dust rather than as out of range.
+    arm = _make_arm(closed_gripper_position=75.53)
+    self._discover(arm=arm, limits=(70.3, 134.097))
+    await arm.move_gripper(arm.max_gripper_width, force_sensing=False)
+    self.assertIn("GripOpenPos 134.097", self._sent(arm))
 
   def test_the_soft_limits_stay_in_firmware_units(self):
-    self.assertEqual(self.arm._gripper_soft_min, self.AXIS_MIN)
-    self.assertEqual(self.arm._gripper_soft_max, self.AXIS_MAX)
+    self._discover()
+    self.assertEqual(
+      (self.arm._gripper_soft_min, self.arm._gripper_soft_max), (self.AXIS_MIN, self.AXIS_MAX)
+    )
 
 
 class TestPreciseFlexEvents(unittest.IsolatedAsyncioTestCase):
@@ -766,48 +801,38 @@ class TestPreciseFlexMoveToSafe(unittest.IsolatedAsyncioTestCase):
 class TestPreciseFlexStationAccess(unittest.IsolatedAsyncioTestCase):
   """How the arm reaches a station is the caller's to set.
 
-  Labware does not agree on one geometry: a plate on an open pad wants a few mm
-  of allowance for the skirt, a hotel has to be entered from the side.
+  Labware does not agree on one geometry: a plate on an open pad wants a few mm of
+  allowance for the skirt, a hotel has to be entered from the side.
   """
-
-  POSE: dict[int, float] = {
-    Axis.BASE: 50.0,
-    Axis.SHOULDER: 10.0,
-    Axis.ELBOW: 200.0,
-    Axis.WRIST: 90.0,
-    Axis.GRIPPER: 0.0,
-  }
 
   def setUp(self):
     self.arm = _make_arm()
-    self.arm._wait_for_eom = AsyncMock()  # type: ignore[method-assign]
 
   def _station_type_cmd(self) -> str:
     sent = [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
     return next(c for c in sent if c.startswith("StationType"))
 
+  async def _pick(self, **kwargs):
+    await self.arm.pick_up_at_location(_PAD_1, direction=2.03, resource_width=80.0, **kwargs)
+
   async def test_default_keeps_the_previous_station_geometry(self):
     # Callers that pass nothing keep what the driver used to hardcode.
-    await self.arm.pick_up_at_joint_position(self.POSE, resource_width=80.0)
+    await self._pick()
     self.assertEqual(self._station_type_cmd(), "StationType 1 1 0 100.0 0.0 10.0")
 
   async def test_vertical_access_carries_its_own_clearance_and_grasp_offset(self):
-    await self.arm.pick_up_at_joint_position(
-      self.POSE, resource_width=80.0, access=StationAccess(clearance=20.0, grasp_offset=3.0)
-    )
+    await self._pick(access=StationAccess(clearance=20.0, grasp_offset=3.0))
     self.assertEqual(self._station_type_cmd(), "StationType 1 1 0 20.0 0.0 3.0")
 
   async def test_horizontal_access_flips_the_station_access_type(self):
-    await self.arm.pick_up_at_joint_position(
-      self.POSE,
-      resource_width=80.0,
-      access=StationAccess(approach="horizontal", clearance=50.0, z_above=15.0, grasp_offset=3.0),
+    await self._pick(
+      access=StationAccess(approach="horizontal", clearance=50.0, z_above=15.0, grasp_offset=3.0)
     )
     self.assertEqual(self._station_type_cmd(), "StationType 1 0 0 50.0 15.0 3.0")
 
   async def test_drop_carries_the_access_too(self):
-    await self.arm.drop_at_joint_position(
-      self.POSE, resource_width=80.0, access=StationAccess(clearance=20.0, grasp_offset=3.0)
+    await self.arm.drop_at_location(
+      _PAD_1, direction=2.03, access=StationAccess(clearance=20.0, grasp_offset=3.0)
     )
     self.assertEqual(self._station_type_cmd(), "StationType 1 1 0 20.0 0.0 3.0")
 
@@ -815,50 +840,50 @@ class TestPreciseFlexStationAccess(unittest.IsolatedAsyncioTestCase):
 class TestPlateStationIsWrittenAsCartesian(unittest.IsolatedAsyncioTestCase):
   """PARobot's pick and place read the station's Cartesian location.
 
-  `TeachPlate`, the vendor's own way to teach a pick point, stores one. A
-  station written with `locAngles` is an angles location, and `pickplate` then
-  drives to a Cartesian location nobody set - on the bench arm, to an unrelated
-  pose that ended in `-1012 Joint out-of-range`.
+  `TeachPlate`, the vendor's own way to teach a pick point, stores one. A station
+  written with `locAngles` is an angles location, and `pickplate` then drives to a
+  Cartesian location nobody set - on the bench arm, to an unrelated pose that ended in
+  `-1012 Joint out-of-range`.
   """
 
   def setUp(self):
     self.arm = _make_arm()
-    self.arm._wait_for_eom = AsyncMock()  # type: ignore[method-assign]
 
-  def _sent(self) -> list[str]:
-    return [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
+  def _sent(self, arm=None) -> list[str]:
+    return [c.args[0] for c in mocked((arm or self.arm).send_command).call_args_list]
 
   def _cmd(self, verb: str) -> str:
     return next(c for c in self._sent() if c.lower().startswith(verb.lower()))
 
   async def _pick(self, **kwargs):
-    await self.arm.pick_up_at_location(
-      Coordinate(329.9, 80.29, 40.48), direction=2.03, resource_width=80.0, **kwargs
-    )
+    await self.arm.pick_up_at_location(_PAD_1, direction=2.03, resource_width=80.0, **kwargs)
 
   async def test_the_station_is_written_with_locXyz_not_locAngles(self):
     await self._pick(orientation="left")
     self.assertFalse([c for c in self._sent() if c.startswith("locAngles")], self._sent())
     self.assertEqual(self._cmd("locXyz"), "locXyz 1 329.9 80.29 40.48 2.03 90 -180")
 
-  async def test_the_taught_pitch_and_roll_reach_the_station(self):
-    # The IK reads yaw alone, so these only start to matter once the pose is
-    # handed to the controller. A vertical plate grip is pitch 90, roll -180.
+  async def test_the_taught_pose_reaches_the_station_unchanged(self):
+    # No model in the path: the coordinates on the wire are the ones handed in, not a
+    # round trip through link lengths the driver may have had to guess at.
     await self._pick(orientation="left")
     x, y, z, yaw, pitch, roll = self._cmd("locXyz").split()[2:]
-    self.assertEqual((pitch, roll), ("90", "-180"))
+    self.assertEqual((x, y, z), ("329.9", "80.29", "40.48"))
+    self.assertEqual((yaw, pitch, roll), ("2.03", "90", "-180"))
 
   async def test_the_elbow_branch_is_pinned_without_restricting_the_wrist(self):
-    # 0x1000 (GPL_Single) pins the wrist to +/-180; this arm's taught poses sit
-    # near -300, so it must not be set.
+    # 0x1000 (GPL_Single) pins the wrist to +/-180; PF400 poses are routinely taught
+    # past a half turn, so it must not be set.
     await self._pick(orientation="left")
     self.assertEqual(self._cmd("locConfig"), "locConfig 1 2")
+
+  async def test_the_right_elbow_gets_its_own_config(self):
     await self._pick(orientation="right")
-    self.assertIn("locConfig 1 1", self._sent())
+    self.assertEqual(self._cmd("locConfig"), "locConfig 1 1")
 
   async def test_config_is_cleared_when_the_caller_has_no_preference(self):
-    # One station index serves every pick, so an unwritten Config would keep
-    # whatever the last operation left there.
+    # One station index serves every pick, so an unwritten Config would keep whatever
+    # the last operation left there.
     await self._pick(orientation=None)
     self.assertEqual(self._cmd("locConfig"), "locConfig 1 0")
 
@@ -868,14 +893,47 @@ class TestPlateStationIsWrittenAsCartesian(unittest.IsolatedAsyncioTestCase):
     pick = next(i for i, c in enumerate(sent) if c.startswith("pickplate"))
     for verb in ("locXyz", "StationType", "locConfig"):
       self.assertLess(
-        next(i for i, c in enumerate(sent) if c.startswith(verb)), pick, f"{verb} must precede the pick"
+        next(i for i, c in enumerate(sent) if c.startswith(verb)),
+        pick,
+        f"{verb} must precede the pick",
       )
 
-  async def test_a_joint_pose_reaches_the_station_as_cartesian_too(self):
-    await self.arm.drop_at_joint_position(
-      {Axis.BASE: 40.48, Axis.SHOULDER: 84.76, Axis.ELBOW: 229.84, Axis.WRIST: -312.57,
-       Axis.GRIPPER: 0.0},
-      resource_width=80.0,
+  async def test_a_station_that_stays_an_angles_location_stops_the_pick(self):
+    # The station table is persistent controller state, so a station an older driver
+    # wrote with locAngles can still be an angles location when we write it.
+    arm = _make_arm(loc_reply="1 1 40.48 84.76 229.84 -312.57 0.0")
+    with self.assertRaises(PreciseFlexError) as caught:
+      await arm.pick_up_at_location(_PAD_1, direction=2.03, resource_width=80.0)
+    self.assertIn("Cartesian", str(caught.exception))
+    self.assertFalse([c for c in self._sent(arm) if c.startswith("pickplate")], "pick ran anyway")
+
+
+class TestPickTargetIsCheckedBeforeItMoves(unittest.IsolatedAsyncioTestCase):
+  """The controller-run pick has no pre-flight, so an unreachable target must fail here.
+
+  Otherwise it faults part way through a motion instead of on the call.
+  """
+
+  def setUp(self):
+    self.arm = _make_arm()
+    self.arm._configuration = MagicMock(
+      work_envelope=WorkEnvelope(inner=100.0, outer=600.0, zmin=0.0, zmax=400.0)
     )
-    self.assertFalse([c for c in self._sent() if c.startswith("locAngles")], self._sent())
-    self.assertTrue(self._cmd("locXyz").startswith("locXyz 1 "), self._cmd("locXyz"))
+
+  def _sent(self) -> list[str]:
+    return [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
+
+  async def test_a_target_beyond_the_annulus_is_refused(self):
+    with self.assertRaises(IKError):
+      await self.arm.pick_up_at_location(
+        Coordinate(2000.0, 0.0, 40.0), direction=0.0, resource_width=80.0
+      )
+    self.assertFalse(self._sent(), "nothing should reach the controller")
+
+  async def test_a_target_below_the_z_travel_is_refused(self):
+    with self.assertRaises(IKError):
+      await self.arm.drop_at_location(Coordinate(300.0, 80.0, -50.0), direction=0.0)
+
+  async def test_a_reachable_target_still_goes_through(self):
+    await self.arm.pick_up_at_location(_PAD_1, direction=2.03, resource_width=80.0)
+    self.assertTrue([c for c in self._sent() if c.startswith("pickplate")], self._sent())
