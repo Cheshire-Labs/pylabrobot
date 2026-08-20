@@ -1747,13 +1747,16 @@ class PreciseFlex:
   def _adopt_configuration(self, config: "PreciseFlexConfiguration") -> None:
     """Adopt the discovered configuration as the source of truth for later commands.
 
-    The gripper width limits come from the gripper-axis soft limits, IK/FK use the
-    device link lengths, and the rail / dual-gripper command paths follow the axes
-    the controller actually reports.
+    The gripper width limits are converted off the gripper-axis soft limits, IK/FK
+    use the device link lengths, and the rail / dual-gripper command paths follow
+    the axes the controller actually reports.
     """
-    gmin, gmax = config.gripper_width_range
+    gmin, gmax = config.gripper_axis_limits
     self._gripper_soft_min, self._gripper_soft_max = gmin, gmax
-    self.min_gripper_width, self.max_gripper_width = gmin, gmax
+    # Widths reach the axis through closed_gripper_position, so the top of the
+    # travel has to be converted; copying it strands whatever the anchor offsets.
+    self.min_gripper_width = gmin
+    self.max_gripper_width = gmin + (gmax - self.closed_gripper_position)
     self._kinematics_params = config.kinematics
     self._has_rail = config.has_rail
     self._is_dual_gripper = config.is_dual_gripper

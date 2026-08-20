@@ -89,6 +89,47 @@ class TestPreciseFlex400Gripper(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(self.arm._mm_to_firmware_units(100.0), 540.0)
 
 
+class TestGripperWidthsAdoptedFromSoftLimits(unittest.IsolatedAsyncioTestCase):
+  """The advertised widths must be commandable on the arm that reported them.
+
+  Bench numbers: the gripper axis reports soft limits [69.0, 134.0] and the
+  fitted gripper closes at 75.5. The two differ, which is the case that used to
+  strand the top of the range.
+  """
+
+  AXIS_MIN, AXIS_MAX = 69.0, 134.0
+  CLOSED_AT = 75.5
+
+  def setUp(self):
+    self.arm = _make_arm(closed_gripper_position=self.CLOSED_AT)
+    discovered = MagicMock()
+    discovered.gripper_axis_limits = (self.AXIS_MIN, self.AXIS_MAX)
+    discovered.has_rail = False
+    discovered.is_dual_gripper = False
+    self.arm._adopt_configuration(discovered)
+
+  def _sent(self) -> list[str]:
+    return [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
+
+  async def test_opening_to_the_advertised_max_is_accepted(self):
+    await self.arm.move_gripper(self.arm.max_gripper_width, force_sensing=False)
+    self.assertIn(f"GripOpenPos {self.AXIS_MAX}", self._sent())
+
+  async def test_closing_to_the_advertised_min_is_accepted(self):
+    await self.arm.move_gripper(self.arm.min_gripper_width, force_sensing=True)
+    self.assertIn(f"GripClosePos {self.CLOSED_AT}", self._sent())
+
+  def test_advertised_widths_map_inside_the_axis_range(self):
+    for width in (self.arm.min_gripper_width, self.arm.max_gripper_width):
+      units = self.arm._mm_to_firmware_units(width)
+      self.assertGreaterEqual(units, self.AXIS_MIN)
+      self.assertLessEqual(units, self.AXIS_MAX)
+
+  def test_the_soft_limits_stay_in_firmware_units(self):
+    self.assertEqual(self.arm._gripper_soft_min, self.AXIS_MIN)
+    self.assertEqual(self.arm._gripper_soft_max, self.AXIS_MAX)
+
+
 class TestPreciseFlexEvents(unittest.IsolatedAsyncioTestCase):
   async def test_gripper_event_uses_default_length_unit_field(self):
     arm = _make_arm()
