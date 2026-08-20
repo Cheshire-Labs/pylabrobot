@@ -10,7 +10,13 @@ from pylabrobot.opentrons.labware_definitions import (
   build_plate_definition,
   build_tip_rack_definition,
 )
-from pylabrobot.opentrons.robot import COMMAND_POLL_HEADROOM, OpentronsError, OpentronsRobot
+from pylabrobot.opentrons.robot import (
+  COMMAND_POLL_HEADROOM,
+  DEFAULT_COMMAND_TIMEOUT,
+  DEFAULT_STATUS_POLL_INTERVAL,
+  OpentronsError,
+  OpentronsRobot,
+)
 from pylabrobot.opentrons.transport import OpentronsTransport
 from pylabrobot.resources import Container, Plate, Resource, TipRack
 from pylabrobot.resources.opentrons.flex_deck import FlexDeck
@@ -104,15 +110,15 @@ class OpentronsFlex(OpentronsRobot):
     host: str,
     port: int = 31950,
     transport: Optional[OpentronsTransport] = None,
-    timeout: float = 30.0,
-    command_timeout: float = 30.0,
-    status_poll_interval: float = 0.2,
+    request_timeout: Optional[float] = None,
+    command_timeout: float = DEFAULT_COMMAND_TIMEOUT,
+    status_poll_interval: float = DEFAULT_STATUS_POLL_INTERVAL,
   ) -> None:
     super().__init__(
       host=host,
       port=port,
       transport=transport,
-      timeout=timeout,
+      request_timeout=request_timeout,
       command_timeout=command_timeout,
       status_poll_interval=status_poll_interval,
     )
