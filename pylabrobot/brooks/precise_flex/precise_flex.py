@@ -34,10 +34,11 @@ logger = logging.getLogger(__name__)
 # was derived from.
 _GRIPPER_UNIT_EPS = 1e-6
 
-# How much wider than the plate the jaws open before reaching in, and how close to the
-# commanded close position counts as having caught nothing.
-_JAW_MARGIN = 5.0
-_NO_PLATE_MARGIN = 2.0
+# Both in gripper-axis units, relative to the calibrated grip position. Opening is a small
+# step off the plate rather than a sweep to the stop, which is a long move to no purpose.
+_JAW_OPENING = 10.0
+# A plate holds the jaws open past the commanded grip; empty jaws settle on it.
+_PLATE_PRESENT_MARGIN = 2.0
 
 # Leaving a station at grip height keeps the skirt in the nest, so the next traverse drags
 # it. An SBS plate is 14.35 mm tall; the resource plus a margin clears what held it.
@@ -850,27 +851,33 @@ class PreciseFlex:
     await self._move_to(raised, direction, orientation)
     await self._move_to(_back_off(raised, direction, access.clearance), direction, orientation)
 
-  async def _grip(self, resource_width: float) -> None:
-    """Close on the plate and check something is actually in the jaws.
+  async def _grip(self, plate_present_margin: float) -> None:
+    """Close to the calibrated grip position and check something is actually in the jaws.
 
-    Force sensing stops the fingers on contact, so the commanded width is a floor rather
-    than a target: reaching it means they met nothing.
+    The commanded position is `closed_gripper_position`, which is where a held plate wants
+    the fingers. Commanding tighter and letting the plate stop them holds a standing
+    position error, and the controller reads sustained torque as an overheating motor
+    (-3104) rather than as a grip.
     """
-    await self.move_gripper(self.min_gripper_width, force_sensing=True)
+    await self.move_gripper_joint_position(self.closed_gripper_position, force_sensing=True)
     joints = await self.request_joint_position()
-    closed_at = self._mm_to_firmware_units(self.min_gripper_width)
-    if joints[Axis.GRIPPER] <= closed_at + _NO_PLATE_MARGIN:
+    if joints[Axis.GRIPPER] < self.closed_gripper_position + plate_present_margin:
       raise PreciseFlexError(
         -1,
-        f"the gripper closed to {joints[Axis.GRIPPER]:.1f} with nothing in it; expected to "
-        f"stop near a {resource_width} mm resource.",
+        f"the gripper closed to {joints[Axis.GRIPPER]:.1f} with nothing in it; a resource "
+        f"would have held it above {self.closed_gripper_position + plate_present_margin:.1f}.",
       )
 
-  async def _release(self) -> None:
-    """Open just far enough to let the plate go, rather than sweeping to the full width."""
+  async def _release(self, jaw_opening: float) -> None:
+    """Open a step off the plate, rather than sweeping the fingers to the stop."""
     joints = await self.request_joint_position()
-    held = joints[Axis.GRIPPER] - self.closed_gripper_position + self._anchor_width_mm
-    await self.move_gripper(min(held + _JAW_MARGIN, self.max_gripper_width))
+    await self._open_to(joints[Axis.GRIPPER] + jaw_opening)
+
+  async def _open_to(self, position: float) -> None:
+    """Open the jaws to a gripper-axis position, never past the axis ceiling."""
+    if self._gripper_soft_max is not None:
+      position = min(position, self._gripper_soft_max)
+    await self.move_gripper_joint_position(position, force_sensing=False)
 
   def _assert_within_work_envelope(self, location: Coordinate, rail_position: float) -> None:
     """Refuse an unreachable station before the controller starts moving toward it.
@@ -2472,8 +2479,9 @@ class PreciseFlex:
     """Move the PreciseFlex gripper jaws.
 
     ``force_sensing=False`` drives to the open position (``gripper 1``);
-    ``force_sensing=True`` drives to the close position with force feedback
-    (``gripper 2``), which may stop short of ``width`` on contact.
+    ``force_sensing=True`` drives to the close position (``gripper 2``). Both are position
+    moves: the plug-in documents its force-controlled grip as belonging to ``PickPlate``,
+    so commanding past a held object holds a standing error rather than yielding to it.
 
     Not interruptible: the ``gripper`` firmware command blocks the controller's command interpreter
     until the jaws finish (hardware-verified, like ``waitForEom``), so a user interrupt cannot halt it
@@ -2581,7 +2589,7 @@ class PreciseFlex:
 
   @evented_operation(
     "precise_flex.pick_up_at_location",
-    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, resource_height=_SBS_PLATE_HEIGHT, travel_margin=_TRAVEL_MARGIN, orientation=None, rail_position=None: {
+    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, resource_height=_SBS_PLATE_HEIGHT, travel_margin=_TRAVEL_MARGIN, jaw_opening=_JAW_OPENING, plate_present_margin=_PLATE_PRESENT_MARGIN, orientation=None, rail_position=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
@@ -2603,6 +2611,8 @@ class PreciseFlex:
     grasp_force: float = 10.0,
     resource_height: float = _SBS_PLATE_HEIGHT,
     travel_margin: float = _TRAVEL_MARGIN,
+    jaw_opening: float = _JAW_OPENING,
+    plate_present_margin: float = _PLATE_PRESENT_MARGIN,
     orientation: Optional[ElbowOrientation] = None,
     rail_position: Optional[float] = None,
     access: Optional[StationAccess] = None,
@@ -2622,6 +2632,9 @@ class PreciseFlex:
       resource_height: Height of the resource in mm. With `travel_margin` it sets how far
         the arm rises once it has the plate, so the skirt clears whatever held it.
       travel_margin: Extra mm above `resource_height` on that rise.
+      jaw_opening: Gripper-axis units to stand off the grip position before reaching in.
+      plate_present_margin: Gripper-axis units a resource must hold the jaws above the
+        grip position for the pick to count as having caught something.
       orientation: Elbow orientation (``"lefty"`` or ``"righty"``). Which elbow branch the
         approach solves for. None leaves it to whichever is closest.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
@@ -2650,16 +2663,23 @@ class PreciseFlex:
       finger_speed_pct=finger_speed_pct,
       grasp_force=grasp_force,
     )
-    await self.move_gripper(min(resource_width + _JAW_MARGIN, self.max_gripper_width))
+    await self._open_to(self.closed_gripper_position + jaw_opening)
     await self._reach_in(location, direction, access, orientation)
-    await self._grip(resource_width)
+    try:
+      await self._grip(plate_present_margin)
+    except PreciseFlexError:
+      # Failing with the arm still down in the nest leaves it there for whatever runs next.
+      await self._back_out(
+        location, direction, access, orientation, lift=resource_height + travel_margin
+      )
+      raise
     await self._back_out(
       location, direction, access, orientation, lift=resource_height + travel_margin
     )
 
   @evented_operation(
     "precise_flex.drop_at_location",
-    lambda self, location, direction, resource_height=_SBS_PLATE_HEIGHT, travel_margin=_TRAVEL_MARGIN, orientation=None, rail_position=None: {
+    lambda self, location, direction, resource_height=_SBS_PLATE_HEIGHT, travel_margin=_TRAVEL_MARGIN, jaw_opening=_JAW_OPENING, orientation=None, rail_position=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
@@ -2675,6 +2695,7 @@ class PreciseFlex:
     direction: float,
     resource_height: float = _SBS_PLATE_HEIGHT,
     travel_margin: float = _TRAVEL_MARGIN,
+    jaw_opening: float = _JAW_OPENING,
     orientation: Optional[ElbowOrientation] = None,
     rail_position: Optional[float] = None,
     access: Optional[StationAccess] = None,
@@ -2691,6 +2712,7 @@ class PreciseFlex:
       resource_height: Height of the resource in mm. With `travel_margin` it sets how far
         the fingers rise after opening, so they clear the skirt they were around.
       travel_margin: Extra mm above `resource_height` on that rise.
+      jaw_opening: Gripper-axis units to open off the plate when letting go.
       orientation: Elbow orientation (``"lefty"`` or ``"righty"``). Which elbow branch the
         approach solves for. None leaves it to whichever is closest.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
@@ -2714,7 +2736,7 @@ class PreciseFlex:
     self._assert_within_work_envelope(location, rail_position or 0.0)
     access = access or StationAccess()
     await self._reach_in(location, direction, access, orientation)
-    await self._release()
+    await self._release(jaw_opening)
     await self._back_out(
       location, direction, access, orientation, lift=resource_height + travel_margin
     )
