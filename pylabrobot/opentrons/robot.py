@@ -80,12 +80,32 @@ class OpentronsRobot(abc.ABC):
     host: str,
     port: int = 31950,
     transport: Optional[OpentronsTransport] = None,
+    timeout: float = 30.0,
+    command_timeout: float = 30.0,
+    status_poll_interval: float = 0.2,
   ) -> None:
+    """Args:
+    host: the robot's address.
+    port: the robot-server's port.
+    transport: wire transport to use instead of a real one, for offline runs.
+    timeout: how long one request/response may take, in seconds. Recorded as
+      ``request_timeout`` and used to build the transport; an injected
+      ``transport`` carries its own instead.
+    command_timeout: how long to poll a command before giving up, in seconds. A
+      command that names its own motion time gets that plus the poll headroom,
+      whichever is longer.
+    status_poll_interval: delay between two command-status reads, in seconds.
+    """
     self.host, self.port = host, port
     self.base_url = f"http://{host}:{port}"
+    self.request_timeout = timeout
+    self.command_timeout = command_timeout
+    self.status_poll_interval = status_poll_interval
     # Built here rather than on connect: a pylabrobot io refuses construction
     # once a capture is armed, so a robot built first can still be recorded.
-    self._transport: OpentronsTransport = transport or HttpxTransport(base_url=self.base_url)
+    self._transport: OpentronsTransport = transport or HttpxTransport(
+      base_url=self.base_url, timeout=timeout
+    )
     self.run_id: Optional[str] = None
     self.pipette: Optional[PipetteInfo] = None
     self.api_version: Optional[str] = None
@@ -206,7 +226,7 @@ class OpentronsRobot(abc.ABC):
     command_type: str,
     params: Optional[Dict[str, Any]] = None,
     wait: bool = True,
-    timeout: float = 30.0,
+    timeout: Optional[float] = None,
   ) -> Dict[str, Any]:
     """Send any robot command by name, for the parts of the robot this class does not wrap.
 
@@ -276,7 +296,7 @@ class OpentronsRobot(abc.ABC):
     command_type: str,
     params: Dict[str, Any],
     wait: bool = True,
-    timeout: float = 30.0,
+    timeout: Optional[float] = None,
   ) -> Dict[str, Any]:
     """Execute a command within the current run.
 
@@ -289,7 +309,7 @@ class OpentronsRobot(abc.ABC):
         "aspirateInPlace", "pickUpTip", "loadLabware".
       params: Command-specific parameters.
       wait: If True, poll until completion.
-      timeout: Max seconds to wait.
+      timeout: Max seconds to wait. Defaults to the robot's ``command_timeout``.
 
     Returns:
       The completed command data dict (includes "result" field).
@@ -299,7 +319,13 @@ class OpentronsRobot(abc.ABC):
       RuntimeError: If the command times out.
     """
     assert self.run_id is not None, "No active run. Call create_run() first."
-    timeout = max(timeout, _plunger_seconds(params) + COMMAND_POLL_HEADROOM)
+    if timeout is None:
+      timeout = self.command_timeout
+    # Headroom rides on a command's own motion time; it is not a floor under a
+    # command that has none, or no budget below it could ever be set.
+    motion = _plunger_seconds(params)
+    if motion > 0:
+      timeout = max(timeout, motion + COMMAND_POLL_HEADROOM)
     payload = {
       "data": {
         "commandType": command_type,
@@ -327,7 +353,7 @@ class OpentronsRobot(abc.ABC):
         return cmd_data
       elif status == "failed":
         raise OpentronsCommandError(command_type, cmd_data.get("error", {}))
-      await asyncio.sleep(0.2)
+      await asyncio.sleep(self.status_poll_interval)
 
     raise RuntimeError(f"Opentrons command '{command_type}' timed out after {timeout}s")
 

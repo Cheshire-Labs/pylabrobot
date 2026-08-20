@@ -104,8 +104,18 @@ class OpentronsFlex(OpentronsRobot):
     host: str,
     port: int = 31950,
     transport: Optional[OpentronsTransport] = None,
+    timeout: float = 30.0,
+    command_timeout: float = 30.0,
+    status_poll_interval: float = 0.2,
   ) -> None:
-    super().__init__(host=host, port=port, transport=transport)
+    super().__init__(
+      host=host,
+      port=port,
+      transport=transport,
+      timeout=timeout,
+      command_timeout=command_timeout,
+      status_poll_interval=status_poll_interval,
+    )
     self.deck = deck
     self._loaded_labware: Dict[str, str] = {}
     # resource.name -> (namespace, load_name, version) of an uploaded custom definition.
