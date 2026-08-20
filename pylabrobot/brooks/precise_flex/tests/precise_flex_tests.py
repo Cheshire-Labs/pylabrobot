@@ -1010,6 +1010,25 @@ class TestPickTargetIsCheckedBeforeItMoves(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(IKError):
       await self.arm.drop_at_location(Coordinate(300.0, 80.0, -50.0), direction=0.0)
 
+  async def test_a_retreat_that_would_leave_the_z_travel_is_refused_too(self):
+    # The grip point is inside the travel and the lift is not. Catching it on the lift
+    # would mean failing with the plate already in the jaws.
+    with self.assertRaises(IKError):
+      await self.arm.pick_up_at_location(
+        Coordinate(300.0, 80.0, 395.0), direction=0.0, resource_width=80.0,
+        access=StationAccess(clearance=2.0, grasp_offset=20.0),
+      )
+    self.assertFalse(self._sent(), "nothing should reach the controller")
+
+  async def test_a_shelf_is_measured_by_its_own_lift_not_the_standoff(self):
+    # `clearance` is a horizontal standoff on a shelf, so it is not a height at all, and
+    # a station near the top of the travel must not be refused for it.
+    with patch.object(self.arm, "move_to_location", AsyncMock()):
+      await self.arm.drop_at_location(
+        Coordinate(300.0, 80.0, 395.0), direction=0.0,
+        access=StationAccess(approach="horizontal", clearance=100.0, z_above=3.0),
+      )
+
 
 class TestNothingIsCommandedWhileTheArmIsStillMoving(unittest.IsolatedAsyncioTestCase):
   """`moveJ` returns as soon as the controller accepts it, and the connection stays free

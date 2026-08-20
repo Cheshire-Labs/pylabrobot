@@ -78,6 +78,17 @@ def _back_off(location: Coordinate, direction: float, mm: float) -> Coordinate:
   return Coordinate(location.x - mm * cos(yaw), location.y - mm * sin(yaw), location.z)
 
 
+def _highest_lift(access: StationAccess, retreat_lift: float) -> float:
+  """The most a pick or place rises above the plate, for the pre-flight to check.
+
+  A vertical station is approached from `clearance` and left by the retreat, whichever is
+  higher. A shelf only ever rises by `z_above`, on both legs.
+  """
+  if access.approach == "vertical":
+    return max(access.clearance, retreat_lift)
+  return access.z_above
+
+
 def _cartesian_target_reference(
   location: Coordinate,
   direction: float,
@@ -893,11 +904,16 @@ class PreciseFlex:
       position = min(position, self._gripper_soft_max)
     await self.move_gripper_joint_position(position, force_sensing=False)
 
-  def _assert_within_work_envelope(self, location: Coordinate, rail_position: float) -> None:
+  def _assert_within_work_envelope(
+    self, location: Coordinate, rail_position: float, highest_lift: float
+  ) -> None:
     """Refuse an unreachable station before the controller starts moving toward it.
 
-    The controller-run pick has no pre-flight of its own, so without this an
-    out-of-reach target faults part way through a motion instead of failing on the call.
+    The controller-run pick had no pre-flight of its own, so without this an out-of-reach
+    target faults part way through a motion instead of failing on the call - and the lift is
+    checked as well as the grip point, because a retreat that leaves the Z travel would fail
+    with a plate already in the jaws. Reach is the grip point only, against the yaw-free TCP
+    annulus, so this is a cheap refusal and the per-leg IK still has the final say.
     """
     if self._configuration is None:
       return
@@ -912,6 +928,11 @@ class PreciseFlex:
       raise IKError(
         f"target z={location.z} is outside the arm's Z travel "
         f"[{envelope.zmin}, {envelope.zmax}]"
+      )
+    if location.z + highest_lift > envelope.zmax:
+      raise IKError(
+        f"rising {highest_lift} mm above z={location.z} reaches "
+        f"{location.z + highest_lift}, past the top of the arm's Z travel {envelope.zmax}"
       )
 
   async def _cart_to_joints(self, cart: PreciseFlexCartesianPose) -> JointPose:
@@ -2673,14 +2694,17 @@ class PreciseFlex:
       direction,
       resource_width,
     )
-    if rail_position is not None:
-      await self.move_rail(rail_position)
-    elif self._has_rail:
+    if rail_position is None and self._has_rail:
       raise ValueError(
         "rail_position must be specified for pick_up_at_location when using a rail-equipped arm."
       )
-    self._assert_within_work_envelope(location, rail_position or 0.0)
     access = access or StationAccess()
+    loaded_lift = resource_height + travel_margin + access.grasp_offset
+    self._assert_within_work_envelope(
+      location, rail_position or 0.0, _highest_lift(access, loaded_lift)
+    )
+    if rail_position is not None:
+      await self.move_rail(rail_position)
     await self._set_grasp_data(
       plate_width=resource_width,
       finger_speed_pct=finger_speed_pct,
@@ -2702,14 +2726,7 @@ class PreciseFlex:
         lift=resource_height + travel_margin,
       )
       raise
-    await self._back_out(
-      location,
-      direction,
-      access,
-      orientation,
-      rail_position,
-      lift=resource_height + travel_margin + access.grasp_offset,
-    )
+    await self._back_out(location, direction, access, orientation, rail_position, lift=loaded_lift)
 
   @evented_operation(
     "precise_flex.drop_at_location",
@@ -2762,14 +2779,16 @@ class PreciseFlex:
       location.z,
       direction,
     )
-    if rail_position is not None:
-      await self.move_rail(rail_position)
-    elif self._has_rail:
+    if rail_position is None and self._has_rail:
       raise ValueError(
         "rail_position must be specified for drop_at_location when using a rail-equipped arm."
       )
-    self._assert_within_work_envelope(location, rail_position or 0.0)
     access = access or StationAccess()
+    self._assert_within_work_envelope(
+      location, rail_position or 0.0, _highest_lift(access, resource_height + travel_margin)
+    )
+    if rail_position is not None:
+      await self.move_rail(rail_position)
     await self._reach_in(location, direction, access, orientation, rail_position)
     await self._release(jaw_opening)
     await self._back_out(
