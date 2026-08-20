@@ -5,7 +5,7 @@ import dataclasses
 import logging
 import time
 import warnings
-from math import hypot
+from math import cos, hypot, radians, sin
 from typing import Callable, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence
 
 from pylabrobot.brooks.precise_flex import kinematics
@@ -34,8 +34,10 @@ logger = logging.getLogger(__name__)
 # was derived from.
 _GRIPPER_UNIT_EPS = 1e-6
 
-# Type code `loc` reports for a Cartesian station location; 1 is an angles location.
-_LOCATION_TYPE_CARTESIAN = 0
+# How much wider than the plate the jaws open before reaching in, and how close to the
+# commanded close position counts as having caught nothing.
+_JAW_MARGIN = 5.0
+_NO_PLATE_MARGIN = 2.0
 
 
 # InRange sentinel that lets the controller blend through waypoints instead of stopping at each one.
@@ -58,6 +60,16 @@ def _joint_pose_reference(position: JointPose) -> dict[str, float]:
     (axis.name.lower() if isinstance(axis, Axis) else str(axis)): float(value)
     for axis, value in position.items()
   }
+
+
+def _lift(location: Coordinate, mm: float) -> Coordinate:
+  return Coordinate(location.x, location.y, location.z + mm)
+
+
+def _back_off(location: Coordinate, direction: float, mm: float) -> Coordinate:
+  """Straight back along the approach direction, the way a shelf is entered and left."""
+  yaw = radians(direction)
+  return Coordinate(location.x - mm * cos(yaw), location.y - mm * sin(yaw), location.z)
 
 
 def _cartesian_target_reference(
@@ -782,37 +794,78 @@ class PreciseFlex:
     """
     await self.send_command(f"MoveOneAxis {int(axis)} {position} {self.profile_index}")
 
-  # Station Config bits (GPL_Righty / GPL_Lefty). 0 leaves the branch unspecified.
-  _CONFIG_NONE = 0
-  _CONFIG_RIGHTY = 0x01
-  _CONFIG_LEFTY = 0x02
-
-  async def _set_cartesian_location(
+  async def _move_to(
     self,
-    location_index: int,
-    pose: PreciseFlexCartesianPose,
+    location: Coordinate,
+    direction: float,
+    orientation: Optional[ElbowOrientation],
   ) -> None:
-    """Write a station's Cartesian location and confirm the controller kept it that way.
+    """One leg of a pick or place, through the same guarded move any other travel uses."""
+    await self.move_to_location(location, direction, orientation=orientation)
 
-    The station table is persistent controller state, so a station an earlier driver
-    wrote with `locAngles` is an angles location until something changes its type. The
-    vendor documents a type change for `HereJ`, `HereC` and `TeachPlate` but not for
-    `locXyz`, and a pick against a station of the wrong type reads coordinates nobody
-    set. Cheaper to read the type back than to find out by watching the arm.
+  async def _reach_in(
+    self,
+    location: Coordinate,
+    direction: float,
+    access: StationAccess,
+    orientation: Optional[ElbowOrientation],
+  ) -> None:
+    """Travel from clear air onto the plate, by the route the station's geometry allows.
+
+    A vertical station is entered from directly above. A horizontal one is a shelf: stand
+    off along the approach direction, come in level, and only then close the last gap.
     """
-    await self.send_command(
-      f"locXyz {location_index} "
-      f"{pose.location.x} {pose.location.y} {pose.location.z} "
-      f"{pose.rotation.yaw} {pose.rotation.pitch} {pose.rotation.roll}"
-    )
-    reply = await self.send_command(f"loc {location_index}")
-    if reply.split()[:1] != [str(_LOCATION_TYPE_CARTESIAN)]:
+    if access.approach == "vertical":
+      await self._move_to(_lift(location, access.clearance), direction, orientation)
+      await self._move_to(location, direction, orientation)
+      return
+    standoff = _back_off(location, direction, access.clearance)
+    await self._move_to(_lift(standoff, access.z_above), direction, orientation)
+    await self._move_to(standoff, direction, orientation)
+    await self._move_to(location, direction, orientation)
+
+  async def _back_out(
+    self,
+    location: Coordinate,
+    direction: float,
+    access: StationAccess,
+    orientation: Optional[ElbowOrientation],
+    holding: bool,
+  ) -> None:
+    """Travel from the plate back to clear air, retracing `_reach_in`.
+
+    Carrying a plate needs the extra allowance the station declares for it, so a loaded
+    retreat rises further than an empty one.
+    """
+    if access.approach == "vertical":
+      lift = access.clearance + (access.grasp_offset if holding else 0.0)
+      await self._move_to(_lift(location, lift), direction, orientation)
+      return
+    raised = _lift(location, access.z_above)
+    await self._move_to(raised, direction, orientation)
+    await self._move_to(_back_off(raised, direction, access.clearance), direction, orientation)
+
+  async def _grip(self, resource_width: float) -> None:
+    """Close on the plate and check something is actually in the jaws.
+
+    Force sensing stops the fingers on contact, so the commanded width is a floor rather
+    than a target: reaching it means they met nothing.
+    """
+    await self.move_gripper(self.min_gripper_width, force_sensing=True)
+    joints = await self.request_joint_position()
+    closed_at = self._mm_to_firmware_units(self.min_gripper_width)
+    if joints[Axis.GRIPPER] <= closed_at + _NO_PLATE_MARGIN:
       raise PreciseFlexError(
         -1,
-        f"station {location_index} did not take a Cartesian location (loc returned "
-        f"{reply!r}); pick and place read the station's Cartesian coordinates, so this "
-        f"station has to be retaught, e.g. with TeachPlate.",
+        f"the gripper closed to {joints[Axis.GRIPPER]:.1f} with nothing in it; expected to "
+        f"stop near a {resource_width} mm resource.",
       )
+
+  async def _release(self) -> None:
+    """Open just far enough to let the plate go, rather than sweeping to the full width."""
+    joints = await self.request_joint_position()
+    held = joints[Axis.GRIPPER] - self.closed_gripper_position + self._anchor_width_mm
+    await self.move_gripper(min(held + _JAW_MARGIN, self.max_gripper_width))
 
   def _assert_within_work_envelope(self, location: Coordinate, rail_position: float) -> None:
     """Refuse an unreachable station before the controller starts moving toward it.
@@ -834,26 +887,6 @@ class PreciseFlex:
         f"target z={location.z} is outside the arm's Z travel "
         f"[{envelope.zmin}, {envelope.zmax}]"
       )
-
-  async def _set_location_config(
-    self,
-    location_index: int,
-    orientation: Optional[ElbowOrientation],
-  ) -> None:
-    """Pin the station's elbow branch, or clear it when the caller has no preference.
-
-    Always written: one station index is reused for every pick and place, so an
-    unwritten Config keeps whatever the previous operation left there.
-
-    Deliberately no GPL_Single (0x1000): it restricts the wrist to +/-180, and PF400
-    poses are routinely taught past a full half turn.
-    """
-    config = {
-      "right": self._CONFIG_RIGHTY,
-      "left": self._CONFIG_LEFTY,
-      None: self._CONFIG_NONE,
-    }[orientation]
-    await self.send_command(f"locConfig {location_index} {config}")
 
   async def _cart_to_joints(self, cart: PreciseFlexCartesianPose) -> JointPose:
     """Convert a Cartesian location into a full joint dict using our IK.
@@ -1410,14 +1443,6 @@ class PreciseFlex:
     if not 0 <= finger_speed_pct <= 100:
       raise ValueError(f"finger_speed_pct must be between 0 and 100, got {finger_speed_pct}")
     await self.send_command(f"GraspData {plate_width} {finger_speed_pct} {grasp_force}")
-
-  async def _set_grip_detail(self, access: Optional[StationAccess] = None):
-    """Tell the controller how to reach the pick/place station and back out of it."""
-    access = access or StationAccess()
-    await self.send_command(
-      f"StationType {self.location_index} {1 if access.approach == 'vertical' else 0} 0 "
-      f"{access.clearance} {access.z_above} {access.grasp_offset}"
-    )
 
   def _mm_to_firmware_units(self, width_mm: float) -> float:
     """Convert a jaw width (mm) to the firmware's native position unit.
@@ -2610,17 +2635,16 @@ class PreciseFlex:
         "rail_position must be specified for pick_up_at_location when using a rail-equipped arm."
       )
     self._assert_within_work_envelope(location, rail_position or 0.0)
-    coords = PreciseFlexCartesianPose(
-      location=location,
-      rotation=Rotation(x=-180, y=90, z=direction),
-      orientation=orientation,
-    )
+    access = access or StationAccess()
     await self._set_grasp_data(
       plate_width=resource_width,
       finger_speed_pct=finger_speed_pct,
       grasp_force=grasp_force,
     )
-    await self._pick_plate_c(cartesian_position=coords, access=access)
+    await self.move_gripper(min(resource_width + _JAW_MARGIN, self.max_gripper_width))
+    await self._reach_in(location, direction, access, orientation)
+    await self._grip(resource_width)
+    await self._back_out(location, direction, access, orientation, holding=True)
 
   @evented_operation(
     "precise_flex.drop_at_location",
@@ -2673,48 +2697,10 @@ class PreciseFlex:
         "rail_position must be specified for drop_at_location when using a rail-equipped arm."
       )
     self._assert_within_work_envelope(location, rail_position or 0.0)
-    coords = PreciseFlexCartesianPose(
-      location=location,
-      rotation=Rotation(x=-180, y=90, z=direction),
-      orientation=orientation,
-    )
-    await self._place_plate_c(cartesian_position=coords, access=access)
-
-  async def _run_pick_plate(self) -> None:
-    """Run PARobot's pick against the station the caller has just written."""
-    horizontal_compliance_int = 1 if self.horizontal_compliance else 0
-    ret_code = await self.send_command(
-      f"pickplate {self.location_index} {horizontal_compliance_int} {self.horizontal_compliance_torque}"
-    )
-    if ret_code == "0":
-      raise PreciseFlexError(-1, "the force-controlled gripper detected no plate present.")
-
-  async def _run_place_plate(self) -> None:
-    """Run PARobot's place against the station the caller has just written."""
-    horizontal_compliance_int = 1 if self.horizontal_compliance else 0
-    await self.send_command(
-      f"placeplate {self.location_index} {horizontal_compliance_int} {self.horizontal_compliance_torque}"
-    )
-
-  async def _pick_plate_c(
-    self, cartesian_position: PreciseFlexCartesianPose,
-    access: Optional[StationAccess] = None,
-  ):
-    """Pick a plate at a Cartesian position, handing the pose to the station as-is."""
-    await self._set_cartesian_location(self.location_index, cartesian_position)
-    await self._set_grip_detail(access)
-    await self._set_location_config(self.location_index, cartesian_position.orientation)
-    await self._run_pick_plate()
-
-  async def _place_plate_c(
-    self, cartesian_position: PreciseFlexCartesianPose,
-    access: Optional[StationAccess] = None,
-  ):
-    """Place a plate at a Cartesian position, handing the pose to the station as-is."""
-    await self._set_cartesian_location(self.location_index, cartesian_position)
-    await self._set_grip_detail(access)
-    await self._set_location_config(self.location_index, cartesian_position.orientation)
-    await self._run_place_plate()
+    access = access or StationAccess()
+    await self._reach_in(location, direction, access, orientation)
+    await self._release()
+    await self._back_out(location, direction, access, orientation, holding=False)
 
   # -- parking ------------------------------------------------------------------------------
 
