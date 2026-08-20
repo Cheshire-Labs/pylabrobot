@@ -93,6 +93,11 @@ class OpentronsChatterboxTests(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(ValueError):
       OpentronsOT2ChatterboxBackend(left_pipette_name="not_a_pipette")
 
+  def test_the_chatterbox_checks_the_budgets_the_real_backend_checks(self):
+    """It skips the real __init__, so the two share one helper rather than drifting."""
+    with self.assertRaises(ValueError):
+      OpentronsOT2ChatterboxBackend(status_poll_interval=0.0, verbose=False)
+
   def test_serialize_includes_pipettes(self):
     """serialize() captures the mounted-pipette names (None for an empty mount)."""
     backend = OpentronsOT2ChatterboxBackend(

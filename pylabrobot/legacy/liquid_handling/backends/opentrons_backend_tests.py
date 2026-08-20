@@ -574,11 +574,68 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
   @patch("ot_api.runs.get_command")
   @patch("ot_api.runs.enqueue_command")
   @patch("ot_api.run_id", "run-id", create=True)
-  async def test_a_timed_out_command_stops_the_run_and_refuses_the_next_one(
+  async def test_a_timed_out_move_stops_the_run_and_refuses_the_next_command(
     self, mock_enqueue, mock_get_command, mock_post
   ):
     """Giving up on the wait leaves the command in the robot's queue, where it still
     runs. A caller who retries would make the pipette aspirate twice from one well."""
+    mock_enqueue.return_value = "cmd-1"
+    released = threading.Event()
+    mock_get_command.side_effect = lambda *a, **kw: released.wait()
+
+    backend = self._backend(request_timeout=0.2, command_timeout=0.2)
+    try:
+      with self.assertRaises(TimeoutError):
+        await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
+
+      mock_post.assert_called_once_with("/runs/run-id/actions", {"data": {"actionType": "stop"}})
+
+      with self.assertRaises(RuntimeError) as refused:
+        await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
+    finally:
+      released.set()
+
+    self.assertIn("setup()", str(refused.exception))
+    self.assertEqual(mock_enqueue.call_count, 1)  # the second attempt reached no robot
+
+  @patch("ot_api.requestor.post")
+  @patch("ot_api.runs.get_command")
+  @patch("ot_api.runs.enqueue_command")
+  @patch("ot_api.run_id", "run-id", create=True)
+  async def test_a_command_that_finished_during_the_last_sleep_is_not_a_timeout(
+    self, mock_enqueue, mock_get_command, mock_post
+  ):
+    """The read after the final sleep is the one that sees a command the robot has
+    just finished. Handing it the sliver of deadline that is left cannot answer, and
+    then a move that worked halts the robot and latches the refusal."""
+    mock_enqueue.return_value = "cmd-1"
+    answers = ["running"]
+
+    def status(*args, **kwargs):
+      state = answers.pop(0) if answers else "succeeded"
+      return {"data": {"status": state, "result": {}}}
+
+    mock_get_command.side_effect = status
+
+    # A poll interval wider than the budget puts the whole remainder into one sleep,
+    # so the read that follows it lands exactly on the deadline.
+    backend = self._backend(request_timeout=5.0, command_timeout=0.2, status_poll_interval=1.0)
+
+    await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
+
+    mock_post.assert_not_called()  # nothing halted a run that completed
+    await backend.move_pipette_head(Coordinate(4.0, 5.0, 6.0), pipette_id="left")
+    self.assertEqual(mock_enqueue.call_count, 2)  # and nothing latched the refusal
+
+  @patch("ot_api.requestor.post")
+  @patch("ot_api.runs.get_command")
+  @patch("ot_api.runs.enqueue_command")
+  @patch("ot_api.run_id", "run-id", create=True)
+  async def test_a_slow_position_read_does_not_halt_the_robot(
+    self, mock_enqueue, mock_get_command, mock_post
+  ):
+    """savePosition moves nothing, so giving up on it leaves no motion outstanding.
+    Halting the run and refusing everything after would cost more than the timeout."""
     mock_enqueue.return_value = "cmd-1"
     released = threading.Event()
     mock_get_command.side_effect = lambda *a, **kw: released.wait()
@@ -588,12 +645,110 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
       with self.assertRaises(RuntimeError):
         await backend.get_channel_position(0)
 
-      mock_post.assert_called_once_with("/runs/run-id/actions", {"data": {"actionType": "stop"}})
+      mock_post.assert_not_called()
 
-      with self.assertRaises(RuntimeError) as refused:
+      # still usable: the refusal did not latch
+      with self.assertRaises(RuntimeError) as second:
         await backend.get_channel_position(0)
     finally:
       released.set()
 
+    self.assertNotIn("setup()", str(second.exception))
+    self.assertEqual(mock_enqueue.call_count, 2)
+
+  @patch("ot_api.health.home")
+  @patch("ot_api.health.get")
+  @patch("ot_api.lh.add_mounted_pipettes")
+  @patch("ot_api.runs.create")
+  @patch("ot_api.requestor.post")
+  @patch("ot_api.runs.get_command")
+  @patch("ot_api.runs.enqueue_command")
+  @patch("ot_api.run_id", "run-id", create=True)
+  async def test_a_setup_that_cannot_create_a_run_leaves_the_refusal_in_place(
+    self,
+    mock_enqueue,
+    mock_get_command,
+    mock_post,
+    mock_create,
+    mock_pipettes,
+    mock_health,
+    mock_home,
+  ):
+    """A fresh run is what the stale command cannot execute in, so until one exists
+    there is nothing to lift the refusal. The robot-server answering 409 while it
+    still holds the old run is the likeliest reason an operator is here at all."""
+    mock_enqueue.return_value = "cmd-1"
+    released = threading.Event()
+    mock_get_command.side_effect = lambda *a, **kw: released.wait()
+
+    backend = self._backend(request_timeout=0.2, command_timeout=0.2)
+    try:
+      with self.assertRaises(TimeoutError):
+        await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
+
+      mock_create.side_effect = RuntimeError("RunConflictError")
+      with self.assertRaises(RuntimeError):
+        await backend.setup()
+
+      with self.assertRaises(RuntimeError) as refused:
+        await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
+    finally:
+      released.set()
+
     self.assertIn("setup()", str(refused.exception))
-    self.assertEqual(mock_enqueue.call_count, 1)  # the second attempt reached no robot
+    self.assertEqual(mock_enqueue.call_count, 1)  # nothing went into the stale run
+
+  @patch("ot_api.health.home")
+  @patch("ot_api.health.get")
+  @patch("ot_api.lh.add_mounted_pipettes")
+  @patch("ot_api.runs.create")
+  @patch("ot_api.requestor.post")
+  @patch("ot_api.runs.get_command")
+  @patch("ot_api.runs.enqueue_command")
+  @patch("ot_api.run_id", "run-id", create=True)
+  async def test_setup_is_the_way_back_from_a_latched_refusal(
+    self,
+    mock_enqueue,
+    mock_get_command,
+    mock_post,
+    mock_create,
+    mock_pipettes,
+    mock_health,
+    mock_home,
+  ):
+    """The refusal names setup(); this is what makes that a real instruction."""
+    mock_enqueue.return_value = "cmd-1"
+    mock_create.return_value = "run-2"
+    mock_pipettes.return_value = _PIPETTES
+    mock_health.side_effect = _mock_health_get
+    released = threading.Event()
+    mock_get_command.side_effect = lambda *a, **kw: released.wait()
+
+    backend = self._backend(request_timeout=0.2, command_timeout=0.2)
+    try:
+      with self.assertRaises(TimeoutError):
+        await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
+    finally:
+      released.set()
+
+    mock_get_command.side_effect = lambda *a, **kw: {"data": {"status": "succeeded", "result": {}}}
+    await backend.setup()
+
+    await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
+
+  @patch("ot_api.modules.list_connected_modules")
+  async def test_a_timeout_names_the_call_and_a_readable_budget(self, mock_list):
+    """An operator debugging a lossy OT-2 reads this line; the proxy the backend logs
+    through must not be what it names."""
+    released = threading.Event()
+    mock_list.side_effect = lambda *a, **kw: released.wait()
+
+    backend = self._backend(request_timeout=0.2)
+    try:
+      with self.assertRaises(TimeoutError) as caught:
+        await backend.list_connected_modules()
+    finally:
+      released.set()
+
+    self.assertIn("modules.list_connected_modules", str(caught.exception))
+    self.assertIn("0.2s", str(caught.exception))

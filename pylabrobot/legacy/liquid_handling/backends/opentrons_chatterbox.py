@@ -12,7 +12,6 @@ and volume bookkeeping, the per-operation wire calls) runs unchanged. Contrast
 with ``OpentronsOT2Simulator``, which overrides the high-level methods themselves.
 """
 
-import asyncio
 import logging
 from typing import Dict, List, Optional, Tuple, cast
 
@@ -187,11 +186,7 @@ class OpentronsOT2ChatterboxBackend(OpentronsOT2Backend):
     self._right_pipette_name = right_pipette_name
     self.host = host
     self.port = port
-    self.request_timeout = request_timeout
-    self.command_timeout = command_timeout
-    self.status_poll_interval = status_poll_interval
-    self._request_lock: Optional[asyncio.Lock] = None
-    self._robot_state_unknown = False
+    self._init_wire_state(request_timeout, command_timeout, status_poll_interval)
 
     left = (
       {"name": left_pipette_name, "pipetteId": "chatterbox-left"} if left_pipette_name else None

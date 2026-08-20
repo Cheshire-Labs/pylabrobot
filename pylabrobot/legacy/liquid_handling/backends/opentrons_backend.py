@@ -141,6 +141,9 @@ class _IOLogger:
         logger.log(LOG_LEVEL_IO, "%s(%s)", qualified, ", ".join(parts))
         return attr(*args, **kwargs)
 
+      # Without this every wrapped call answers to "_logged", and anything that
+      # names the call it is reporting on (a timeout message) names the proxy.
+      _logged.__name__ = _logged.__qualname__ = qualified
       return _logged
     return attr
 
@@ -184,13 +187,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     """
     super().__init__()
 
-    for name, value in (
-      ("request_timeout", request_timeout),
-      ("command_timeout", command_timeout),
-      ("status_poll_interval", status_poll_interval),
-    ):
-      if value <= 0:
-        raise ValueError(f"{name} must be greater than 0, got {value}")
+    self._init_wire_state(request_timeout, command_timeout, status_poll_interval)
 
     if not USE_OT:
       raise RuntimeError(
@@ -200,15 +197,6 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
 
     self.host = host
     self.port = port
-    self.request_timeout = request_timeout
-    self.command_timeout = command_timeout
-    self.status_poll_interval = status_poll_interval
-    # Built on first use, not here: on 3.9 a Lock binds to whatever loop is current
-    # when it is constructed, and a backend is routinely built before asyncio.run().
-    self._request_lock: Optional[asyncio.Lock] = None
-    # Set by a command timeout: the robot is still holding a command we stopped
-    # waiting for, so its pose and tip state are no longer ours to describe.
-    self._robot_state_unknown = False
 
     # All hardware I/O goes through this handle so a subclass (e.g. the chatterbox)
     # can dry-run the backend by swapping it for a recording stand-in. The real handle
@@ -225,6 +213,34 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     self.traversal_height = 120  # test
     self._tip_racks: Dict[str, int] = {}  # tip_rack.name -> slot index
     self._plr_name_to_load_name: Dict[str, str] = {}
+
+  def _init_wire_state(
+    self,
+    request_timeout: float,
+    command_timeout: float,
+    status_poll_interval: float,
+  ) -> None:
+    """Check and record the three budgets, and the state the wire layer keeps.
+
+    Shared with the chatterbox, which skips this ``__init__`` because it has no
+    ``ot_api`` to talk to and would otherwise drift from what the wire layer expects.
+    """
+    for name, value in (
+      ("request_timeout", request_timeout),
+      ("command_timeout", command_timeout),
+      ("status_poll_interval", status_poll_interval),
+    ):
+      if value <= 0:
+        raise ValueError(f"{name} must be greater than 0, got {value}")
+    self.request_timeout = request_timeout
+    self.command_timeout = command_timeout
+    self.status_poll_interval = status_poll_interval
+    # Built on first use, not here: on 3.9 a Lock binds to whatever loop is current
+    # when it is constructed, and a backend is routinely built before asyncio.run().
+    self._request_lock: Optional[asyncio.Lock] = None
+    # Set by a command timeout: the robot is still holding a command we stopped
+    # waiting for, so its pose is no longer ours to describe.
+    self._robot_state_unknown = False
 
   def serialize(self) -> dict:
     return {
@@ -259,12 +275,17 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
       # Before 3.11 asyncio.TimeoutError is not builtins.TimeoutError, so re-raising
       # is what gives this backend one give-up type on every supported version.
       raise TimeoutError(
-        f"{getattr(call, '__name__', call)} did not answer within {budget}s"
+        f"{getattr(call, '__name__', call)} did not answer within {budget:g}s"
       ) from exc
 
   async def _locked_call(self, call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """One ``ot_api`` call at a time, which is what the blocking calls gave for free:
-    the robot runs one queue and ``ot_api`` keeps the run id in a module global."""
+    """One ``ot_api`` call at a time: the robot runs one queue and ``ot_api`` keeps the
+    run id in a module global.
+
+    Per call, not per command. The blocking calls this replaced held the event loop for
+    a whole command; here the lock is released between an enqueue and its polls, so
+    keeping two commands off one robot is the caller's job.
+    """
     if self._request_lock is None:
       self._request_lock = asyncio.Lock()
     async with self._request_lock:
@@ -275,12 +296,21 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     command_type: str,
     params: Dict[str, Any],
     timeout: Optional[float] = None,
+    abandon_run_on_timeout: bool = True,
   ) -> Dict[str, Any]:
     """Enqueue one run command and wait for the robot to finish it.
 
     ``ot_api``'s own command wrappers are not used for anything that moves: their
     decorator hard-codes a 30s ceiling no caller can raise, and polls with no delay
     between reads. Enqueue-and-poll here honours ``command_timeout`` instead.
+
+    ``timeout`` bounds the waiting, not the whole call: the enqueue and each status
+    read carry a request budget of their own, so one unanswered request can carry the
+    call past its deadline by up to ``request_timeout``.
+
+    Set ``abandon_run_on_timeout`` False for a command that moves nothing. Giving up
+    on one of those leaves no motion outstanding, so halting the robot and refusing
+    everything after it would cost more than the timeout did.
     """
 
     self._refuse_if_state_unknown()
@@ -295,11 +325,10 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
         timeout=min(self.request_timeout, _seconds_left(deadline)),
       )
       while True:
-        result: Dict[str, Any] = await self._request(
-          self._ot.runs.get_command,
-          command_id,
-          timeout=min(self.request_timeout, _seconds_left(deadline)),
-        )
+        # A read is a request, so it gets a request budget. Handing it whatever is
+        # left of the deadline gives it milliseconds it cannot answer in, and then a
+        # command the robot finished reads as a timeout.
+        result: Dict[str, Any] = await self._request(self._ot.runs.get_command, command_id)
         data = result["data"]
         status = data["status"]
         if status == "failed":
@@ -307,21 +336,26 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
           raise RuntimeError(f"{command_type} failed with {error['errorType']}: {error['detail']}")
         if status not in ("queued", "running"):
           return result
-        # Status is read once more after the deadline passes: a command that finished
-        # during the last sleep succeeded, and calling that a timeout abandons a move.
+        # The deadline is checked after the read, so the read that follows the last
+        # sleep still happens: that is the one that sees a command which finished
+        # while we were asleep.
         remaining = _seconds_left(deadline)
         if remaining <= 0:
-          raise TimeoutError(f"{command_type} did not finish within {budget}s")
+          raise TimeoutError(f"{command_type} did not finish within {budget:g}s")
         await asyncio.sleep(min(self.status_poll_interval, remaining))
     except TimeoutError:
-      await self._abandon_run()
+      if abandon_run_on_timeout:
+        await self._abandon_run()
       raise
 
   def _refuse_if_state_unknown(self) -> None:
     if self._robot_state_unknown:
       raise RuntimeError(
-        "A command timed out and the OT-2 was left holding it, so its pose and tip "
-        "state are unknown. Call setup() to start a fresh run before commanding it."
+        "A command timed out and the OT-2 was left holding it, so its pose is "
+        "unknown. Recover with setup(), which starts a fresh run the stale command "
+        "cannot execute in, and homes. Check the pipettes by eye first: the OT-2 has "
+        "no tip sensor, ending a run does not drop tips, and setup() records both "
+        "mounts as empty, so a tip left on will be pressed into the rack."
       )
 
   async def _abandon_run(self) -> None:
@@ -329,8 +363,10 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
 
     Giving up on the wait does not take the command out of the robot's queue: it will
     still execute, so a caller who retries makes the robot aspirate twice from one
-    well. Stopping the run is what prevents that; refusing until ``setup()`` is what
-    keeps the backend from describing a pose it no longer knows.
+    well. The stop action is what prevents that, but the robot-server only schedules
+    it and answers 201 straight away, so nothing here can confirm the run halted. The
+    refusal is the part that holds: it stands until ``setup()`` builds a new run,
+    which the stale command cannot execute in whatever the old one did.
     """
     self._robot_state_unknown = True
     run_id = getattr(self._ot, "run_id", None)
@@ -350,13 +386,14 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     )
 
   async def setup(self, skip_home: bool = False):
-    # A new run orphans whatever an earlier timeout left queued on the robot, so this
-    # is the one place the unknown-state refusal is lifted.
-    self._robot_state_unknown = False
-
     # create run
     run_id = await self._request(self._ot.runs.create)
     self._ot.set_run(run_id)
+
+    # Only now is the unknown-state refusal lifted. Creating the run is what orphans
+    # whatever an earlier timeout left queued, and it is also the step most likely to
+    # fail here: the robot-server answers 409 while it still holds the old run.
+    self._robot_state_unknown = False
 
     # get pipettes, then assign them. This reads /pipettes and then loads each one,
     # so it needs the command budget rather than a single request's.
@@ -874,7 +911,10 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
     """
 
     return await self._command(
-      "savePosition", {"pipetteId": pipette_id}, timeout=self.request_timeout
+      "savePosition",
+      {"pipetteId": pipette_id},
+      timeout=self.request_timeout,
+      abandon_run_on_timeout=False,
     )
 
   async def _current_channel_position(self, channel: int) -> Tuple[str, Coordinate]:
@@ -885,7 +925,7 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
       res = await self._save_position(pipette_id)
       pos = res["data"]["result"]["position"]
       current = Coordinate(pos["x"], pos["y"], pos["z"])
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
       raise RuntimeError(f"Failed to query current pipette position: {exc}") from exc
 
     return pipette_id, current
