@@ -631,6 +631,38 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
   @patch("ot_api.runs.get_command")
   @patch("ot_api.runs.enqueue_command")
   @patch("ot_api.run_id", "run-id", create=True)
+  async def test_a_status_read_that_never_answers_does_not_end_the_command(
+    self, mock_enqueue, mock_get_command, mock_post
+  ):
+    """A lost GET says nothing about the motion. Ending the command on one takes the
+    abort decision away from whoever asked for the longer budget: with a ten-minute
+    mix and a seven-second request budget, the driver would fire at eight seconds."""
+    mock_enqueue.return_value = "cmd-1"
+    released = threading.Event()
+    reads = []
+
+    def status(*args, **kwargs):
+      reads.append(1)
+      if len(reads) == 1:
+        released.wait()  # this one read never comes back
+      return {"data": {"status": "succeeded", "result": {}}}
+
+    mock_get_command.side_effect = status
+
+    backend = self._backend(request_timeout=0.2, command_timeout=5.0, status_poll_interval=0.01)
+    try:
+      await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
+    finally:
+      released.set()
+
+    self.assertEqual(len(reads), 2)  # it polled again rather than giving up
+    mock_post.assert_not_called()  # and nothing halted a run that was still running
+    await backend.move_pipette_head(Coordinate(4.0, 5.0, 6.0), pipette_id="left")
+
+  @patch("ot_api.requestor.post")
+  @patch("ot_api.runs.get_command")
+  @patch("ot_api.runs.enqueue_command")
+  @patch("ot_api.run_id", "run-id", create=True)
   async def test_a_slow_position_read_does_not_halt_the_robot(
     self, mock_enqueue, mock_get_command, mock_post
   ):

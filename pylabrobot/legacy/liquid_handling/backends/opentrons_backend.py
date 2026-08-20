@@ -306,7 +306,10 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
 
     ``timeout`` bounds the waiting, not the whole call: the enqueue and each status
     read carry a request budget of their own, so one unanswered request can carry the
-    call past its deadline by up to ``request_timeout``.
+    call past its deadline by up to ``request_timeout``. A read that does not answer
+    is retried until the deadline: one lost GET says nothing about the motion, and
+    ending a ten-minute mix at the eight-second mark would take the abort decision
+    away from whoever asked for ten minutes.
 
     Set ``abandon_run_on_timeout`` False for a command that moves nothing. Giving up
     on one of those leaves no motion outstanding, so halting the robot and refusing
@@ -328,7 +331,17 @@ class OpentronsOT2Backend(LiquidHandlerBackend):
         # A read is a request, so it gets a request budget. Handing it whatever is
         # left of the deadline gives it milliseconds it cannot answer in, and then a
         # command the robot finished reads as a timeout.
-        result: Dict[str, Any] = await self._request(self._ot.runs.get_command, command_id)
+        try:
+          result: Dict[str, Any] = await self._request(self._ot.runs.get_command, command_id)
+        except TimeoutError as exc:
+          remaining = _seconds_left(deadline)
+          if remaining <= 0:
+            raise TimeoutError(f"{command_type} did not finish within {budget:g}s") from exc
+          logger.warning(
+            "status read for %s did not answer; %.0fs of its budget left", command_type, remaining
+          )
+          await asyncio.sleep(min(self.status_poll_interval, remaining))
+          continue
         data = result["data"]
         status = data["status"]
         if status == "failed":
