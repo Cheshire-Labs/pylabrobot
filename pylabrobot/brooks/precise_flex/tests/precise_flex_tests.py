@@ -810,3 +810,72 @@ class TestPreciseFlexStationAccess(unittest.IsolatedAsyncioTestCase):
       self.POSE, resource_width=80.0, access=StationAccess(clearance=20.0, grasp_offset=3.0)
     )
     self.assertEqual(self._station_type_cmd(), "StationType 1 1 0 20.0 0.0 3.0")
+
+
+class TestPlateStationIsWrittenAsCartesian(unittest.IsolatedAsyncioTestCase):
+  """PARobot's pick and place read the station's Cartesian location.
+
+  `TeachPlate`, the vendor's own way to teach a pick point, stores one. A
+  station written with `locAngles` is an angles location, and `pickplate` then
+  drives to a Cartesian location nobody set - on the bench arm, to an unrelated
+  pose that ended in `-1012 Joint out-of-range`.
+  """
+
+  def setUp(self):
+    self.arm = _make_arm()
+    self.arm._wait_for_eom = AsyncMock()  # type: ignore[method-assign]
+
+  def _sent(self) -> list[str]:
+    return [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
+
+  def _cmd(self, verb: str) -> str:
+    return next(c for c in self._sent() if c.lower().startswith(verb.lower()))
+
+  async def _pick(self, **kwargs):
+    await self.arm.pick_up_at_location(
+      Coordinate(329.9, 80.29, 40.48), direction=2.03, resource_width=80.0, **kwargs
+    )
+
+  async def test_the_station_is_written_with_locXyz_not_locAngles(self):
+    await self._pick(orientation="left")
+    self.assertFalse([c for c in self._sent() if c.startswith("locAngles")], self._sent())
+    self.assertEqual(self._cmd("locXyz"), "locXyz 1 329.9 80.29 40.48 2.03 90 -180")
+
+  async def test_the_taught_pitch_and_roll_reach_the_station(self):
+    # The IK reads yaw alone, so these only start to matter once the pose is
+    # handed to the controller. A vertical plate grip is pitch 90, roll -180.
+    await self._pick(orientation="left")
+    x, y, z, yaw, pitch, roll = self._cmd("locXyz").split()[2:]
+    self.assertEqual((pitch, roll), ("90", "-180"))
+
+  async def test_the_elbow_branch_is_pinned_without_restricting_the_wrist(self):
+    # 0x1000 (GPL_Single) pins the wrist to +/-180; this arm's taught poses sit
+    # near -300, so it must not be set.
+    await self._pick(orientation="left")
+    self.assertEqual(self._cmd("locConfig"), "locConfig 1 2")
+    await self._pick(orientation="right")
+    self.assertIn("locConfig 1 1", self._sent())
+
+  async def test_config_is_cleared_when_the_caller_has_no_preference(self):
+    # One station index serves every pick, so an unwritten Config would keep
+    # whatever the last operation left there.
+    await self._pick(orientation=None)
+    self.assertEqual(self._cmd("locConfig"), "locConfig 1 0")
+
+  async def test_the_station_is_configured_before_the_pick_runs(self):
+    await self._pick(orientation="left")
+    sent = self._sent()
+    pick = next(i for i, c in enumerate(sent) if c.startswith("pickplate"))
+    for verb in ("locXyz", "StationType", "locConfig"):
+      self.assertLess(
+        next(i for i, c in enumerate(sent) if c.startswith(verb)), pick, f"{verb} must precede the pick"
+      )
+
+  async def test_a_joint_pose_reaches_the_station_as_cartesian_too(self):
+    await self.arm.drop_at_joint_position(
+      {Axis.BASE: 40.48, Axis.SHOULDER: 84.76, Axis.ELBOW: 229.84, Axis.WRIST: -312.57,
+       Axis.GRIPPER: 0.0},
+      resource_width=80.0,
+    )
+    self.assertFalse([c for c in self._sent() if c.startswith("locAngles")], self._sent())
+    self.assertTrue(self._cmd("locXyz").startswith("locXyz 1 "), self._cmd("locXyz"))

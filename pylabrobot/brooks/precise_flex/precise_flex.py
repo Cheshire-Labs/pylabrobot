@@ -797,31 +797,44 @@ class PreciseFlex:
     """
     await self.send_command(f"moveAppro {location_index} {profile_index}")
 
-  async def _set_joint_angles(
+  # PARobot's pick and place read the station's CARTESIAN location (`TeachPlate`
+  # stores one), so a station written with `locAngles` leaves them reading a
+  # location we never set.
+  _CONFIG_NONE = 0
+  _CONFIG_RIGHTY = 0x01
+  _CONFIG_LEFTY = 0x02
+
+  async def _set_cartesian_location(
     self,
     location_index: int,
-    joint_position: JointPose,
+    pose: PreciseFlexCartesianPose,
   ) -> None:
-    """Set joint angles for stored location, handling rail configuration."""
-    if self._has_rail:
-      await self.send_command(
-        f"locAngles {location_index} "
-        f"{joint_position[Axis.RAIL]} "
-        f"{joint_position[Axis.BASE]} "
-        f"{joint_position[Axis.SHOULDER]} "
-        f"{joint_position[Axis.ELBOW]} "
-        f"{joint_position[Axis.WRIST]} "
-        f"{joint_position[Axis.GRIPPER]}"
-      )
-    else:
-      await self.send_command(
-        f"locAngles {location_index} "
-        f"{joint_position[Axis.BASE]} "
-        f"{joint_position[Axis.SHOULDER]} "
-        f"{joint_position[Axis.ELBOW]} "
-        f"{joint_position[Axis.WRIST]} "
-        f"{joint_position[Axis.GRIPPER]}"
-      )
+    """Write a station's Cartesian location: `locXyz <station> X Y Z yaw pitch roll`."""
+    await self.send_command(
+      f"locXyz {location_index} "
+      f"{pose.location.x} {pose.location.y} {pose.location.z} "
+      f"{pose.rotation.yaw} {pose.rotation.pitch} {pose.rotation.roll}"
+    )
+
+  async def _set_location_config(
+    self,
+    location_index: int,
+    orientation: Optional[ElbowOrientation],
+  ) -> None:
+    """Pin the station's elbow branch, or clear it when the caller has no preference.
+
+    Always written: one station index is reused for every pick and place, so an
+    unwritten Config keeps whatever the previous operation left there.
+
+    Deliberately no GPL_Single (0x1000): it restricts the wrist to +/-180, and
+    this arm's taught poses sit near -300.
+    """
+    config = {
+      "right": self._CONFIG_RIGHTY,
+      "left": self._CONFIG_LEFTY,
+      None: self._CONFIG_NONE,
+    }[orientation]
+    await self.send_command(f"locConfig {location_index} {config}")
 
   async def _cart_to_joints(self, cart: PreciseFlexCartesianPose) -> JointPose:
     """Convert a Cartesian location into a full joint dict using our IK.
@@ -2640,7 +2653,7 @@ class PreciseFlex:
       )
     coords = PreciseFlexCartesianPose(
       location=location,
-      rotation=Rotation(z=direction),
+      rotation=Rotation(x=-180, y=90, z=direction),
       orientation=orientation,
       wrist=wrist,
     )
@@ -2705,18 +2718,14 @@ class PreciseFlex:
       )
     coords = PreciseFlexCartesianPose(
       location=location,
-      rotation=Rotation(z=direction),
+      rotation=Rotation(x=-180, y=90, z=direction),
       orientation=orientation,
       wrist=wrist,
     )
     await self._place_plate_c(cartesian_position=coords, access=access)
 
-  async def _pick_plate_j(
-    self, joint_position: JointPose, access: Optional[StationAccess] = None
-  ):
-    """Pick a plate from the specified position using joint coordinates."""
-    await self._set_joint_angles(self.location_index, joint_position)
-    await self._set_grip_detail(access)
+  async def _run_pick_plate(self) -> None:
+    """Run PARobot's pick against the station the caller has just written."""
     horizontal_compliance_int = 1 if self.horizontal_compliance else 0
     ret_code = await self.send_command(
       f"pickplate {self.location_index} {horizontal_compliance_int} {self.horizontal_compliance_torque}"
@@ -2724,32 +2733,44 @@ class PreciseFlex:
     if ret_code == "0":
       raise PreciseFlexError(-1, "the force-controlled gripper detected no plate present.")
 
-  async def _place_plate_j(
-    self, joint_position: JointPose, access: Optional[StationAccess] = None
-  ):
-    """Place a plate at the specified position using joint coordinates."""
-    await self._set_joint_angles(self.location_index, joint_position)
-    await self._set_grip_detail(access)
+  async def _run_place_plate(self) -> None:
+    """Run PARobot's place against the station the caller has just written."""
     horizontal_compliance_int = 1 if self.horizontal_compliance else 0
     await self.send_command(
       f"placeplate {self.location_index} {horizontal_compliance_int} {self.horizontal_compliance_torque}"
     )
 
+  async def _pick_plate_j(
+    self, joint_position: JointPose, access: Optional[StationAccess] = None
+  ):
+    """Pick a plate from a joint pose, forward-solved into the station's Cartesian location."""
+    await self._pick_plate_c(kinematics.fk(joint_position, self._kinematics_params), access)
+
+  async def _place_plate_j(
+    self, joint_position: JointPose, access: Optional[StationAccess] = None
+  ):
+    """Place a plate at a joint pose, forward-solved into the station's Cartesian location."""
+    await self._place_plate_c(kinematics.fk(joint_position, self._kinematics_params), access)
+
   async def _pick_plate_c(
     self, cartesian_position: PreciseFlexCartesianPose,
     access: Optional[StationAccess] = None,
   ):
-    """Pick a plate at a Cartesian position via IK + joint-space pickplate."""
-    joints = await self._cart_to_joints(cartesian_position)
-    await self._pick_plate_j(joints, access)
+    """Pick a plate at a Cartesian position, handing the pose to the station as-is."""
+    await self._set_cartesian_location(self.location_index, cartesian_position)
+    await self._set_grip_detail(access)
+    await self._set_location_config(self.location_index, cartesian_position.orientation)
+    await self._run_pick_plate()
 
   async def _place_plate_c(
     self, cartesian_position: PreciseFlexCartesianPose,
     access: Optional[StationAccess] = None,
   ):
-    """Place a plate at a Cartesian position via IK + joint-space placeplate."""
-    joints = await self._cart_to_joints(cartesian_position)
-    await self._place_plate_j(joints, access)
+    """Place a plate at a Cartesian position, handing the pose to the station as-is."""
+    await self._set_cartesian_location(self.location_index, cartesian_position)
+    await self._set_grip_detail(access)
+    await self._set_location_config(self.location_index, cartesian_position.orientation)
+    await self._run_place_plate()
 
   # -- parking ------------------------------------------------------------------------------
 
