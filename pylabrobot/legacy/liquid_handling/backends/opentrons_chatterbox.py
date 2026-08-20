@@ -3,6 +3,8 @@
 Dry-runs the real OpentronsOT2Backend without hardware or the ``ot_api`` library
 by swapping the backend's transport handle (``self._ot``) for a recorder that
 logs every call and returns canned data for the few reads the backend makes back.
+Robot commands arrive as ``runs.enqueue_command(command_type, params)``, which is
+what the backend puts on the wire, and each is answered "succeeded" on the poll.
 
 This mirrors how ``STARChatterboxBackend`` dry-runs ``STARBackend``: only the
 transport is replaced, so all the real high-level logic (pipette selection, tip
@@ -18,6 +20,9 @@ from pylabrobot.io import LOG_LEVEL_IO
 from pylabrobot.legacy.liquid_handling.backends.backend import LiquidHandlerBackend
 from pylabrobot.legacy.liquid_handling.backends.opentrons_backend import (
   _OT_DECK_IS_ADDRESSABLE_AREA_VERSION,
+  DEFAULT_COMMAND_TIMEOUT,
+  DEFAULT_REQUEST_TIMEOUT,
+  DEFAULT_STATUS_POLL_INTERVAL,
   OpentronsOT2Backend,
 )
 
@@ -56,18 +61,19 @@ class _OTChatterboxModule:
   """Stand-in for the ``ot_api`` module that records calls instead of issuing them.
 
   Provides the sub-namespaces and reads the real backend touches: ``runs.create``,
-  ``lh.add_mounted_pipettes``, ``health.get``, ``labware.define``,
-  ``modules.list_connected_modules`` and the ``savePosition`` command pair return
+  ``runs.enqueue_command``/``runs.get_command``, ``lh.add_mounted_pipettes``,
+  ``health.get``, ``labware.define`` and ``modules.list_connected_modules`` return
   canned data; everything else is recorded and returns ``None``. ``run_id`` stays
-  ``None`` so ``stop()`` skips the cancel request.
+  ``None`` so ``stop()`` skips the release requests.
 
-  A recorded ``lh.move_arm`` updates the position ``savePosition`` reports, so a
-  dry run that reads a channel back gets where it just sent it rather than the
-  origin every time.
+  A recorded ``moveToCoordinates`` updates the position ``savePosition`` reports,
+  so a dry run that reads a channel back gets where it just sent it rather than
+  the origin every time.
   """
 
   def __init__(self, left_pipette, right_pipette, api_version: str, verbose: bool = True):
     self.calls: List[Tuple[str, tuple, dict]] = []
+    self.commands: List[Tuple[str, dict]] = []  # (command_type, params) in send order
     self.run_id: Optional[str] = None
     self._verbose = verbose
 
@@ -104,13 +110,15 @@ class _OTChatterboxModule:
     logger.log(LOG_LEVEL_IO, "%s", rendered)
     if self._verbose:
       print(rendered)
-    if qualified == "lh.move_arm":
-      self._track_move(kwargs)
+    if qualified == "runs.enqueue_command" and len(args) >= 2:
+      self._track_command(args[0], args[1])
 
-  def _track_move(self, kwargs: dict) -> None:
-    """Follow a recorded move, so ``savePosition`` reports where the arm was sent."""
-    for axis in ("x", "y", "z"):
-      moved_to = kwargs.get(f"location_{axis}")
+  def _track_command(self, command_type: str, params: dict) -> None:
+    """Record one robot command, and follow a move so ``savePosition`` reports it."""
+    self.commands.append((command_type, dict(params)))
+    if command_type != "moveToCoordinates":
+      return
+    for axis, moved_to in params.get("coordinates", {}).items():
       if moved_to is not None:
         self.position[axis] = moved_to
 
@@ -131,7 +139,8 @@ class OpentronsOT2ChatterboxBackend(OpentronsOT2Backend):
 
   Runs the real OpentronsOT2Backend logic with its transport replaced by a
   recorder - no hardware and no ``ot_api`` library required. Every issued call is
-  printed and collected in :attr:`commands`.
+  printed; :attr:`commands` collects the robot commands and :attr:`calls` every
+  ``ot_api`` call underneath them.
 
   Example:
     >>> from pylabrobot.legacy.liquid_handling import LiquidHandler
@@ -149,9 +158,9 @@ class OpentronsOT2ChatterboxBackend(OpentronsOT2Backend):
     port: int = 31950,
     api_version: str = _OT_DECK_IS_ADDRESSABLE_AREA_VERSION,
     verbose: bool = True,
-    timeout: float = 30.0,
-    command_timeout: float = 120.0,
-    status_poll_interval: float = 0.05,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    command_timeout: float = DEFAULT_COMMAND_TIMEOUT,
+    status_poll_interval: float = DEFAULT_STATUS_POLL_INTERVAL,
   ):
     """Initialize the chatterbox.
 
@@ -161,9 +170,9 @@ class OpentronsOT2ChatterboxBackend(OpentronsOT2Backend):
       api_version: reported Opentrons API version; defaults to the version at
         which tip drops route through the addressable-area trash.
       verbose: if True, print every recorded call.
-      timeout: how long one request/response with the robot may take, in seconds.
+      request_timeout: how long one request/response with the robot may take, in seconds.
       command_timeout: how long a command that moves the robot may take, in seconds.
-      status_poll_interval: delay between status polls while waiting, in seconds.
+      status_poll_interval: delay between two reads of a running command's status.
     """
     # Skip OpentronsOT2Backend.__init__ (it requires ot_api); set up state directly.
     LiquidHandlerBackend.__init__(self)
@@ -178,10 +187,11 @@ class OpentronsOT2ChatterboxBackend(OpentronsOT2Backend):
     self._right_pipette_name = right_pipette_name
     self.host = host
     self.port = port
-    self.timeout = timeout
+    self.request_timeout = request_timeout
     self.command_timeout = command_timeout
     self.status_poll_interval = status_poll_interval
-    self._request_lock = asyncio.Lock()
+    self._request_lock: Optional[asyncio.Lock] = None
+    self._robot_state_unknown = False
 
     left = (
       {"name": left_pipette_name, "pipetteId": "chatterbox-left"} if left_pipette_name else None
@@ -199,9 +209,14 @@ class OpentronsOT2ChatterboxBackend(OpentronsOT2Backend):
     self._plr_name_to_load_name: Dict[str, str] = {}
 
   @property
-  def commands(self) -> List[Tuple[str, tuple, dict]]:
-    """Recorded ``(qualified_name, args, kwargs)`` for every call issued so far."""
+  def calls(self) -> List[Tuple[str, tuple, dict]]:
+    """Recorded ``(qualified_name, args, kwargs)`` for every ``ot_api`` call issued."""
     return cast(List[Tuple[str, tuple, dict]], self._ot.calls)
+
+  @property
+  def commands(self) -> List[Tuple[str, dict]]:
+    """Recorded ``(command_type, params)`` for every robot command issued so far."""
+    return cast(List[Tuple[str, dict]], self._ot.commands)
 
   def serialize(self) -> dict:
     return {

@@ -16,8 +16,8 @@ from pylabrobot.resources.celltreat import CellTreat_96_wellplate_350ul_Fb
 from pylabrobot.resources.opentrons import OTDeck, opentrons_96_filtertiprack_20ul
 
 
-def _names(backend: OpentronsOT2ChatterboxBackend):
-  return [call[0] for call in backend.commands]
+def _command_types(backend: OpentronsOT2ChatterboxBackend):
+  return [command_type for command_type, _params in backend.commands]
 
 
 class OpentronsChatterboxTests(unittest.IsolatedAsyncioTestCase):
@@ -59,22 +59,34 @@ class OpentronsChatterboxTests(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual(await self.backend.get_channel_position(0), Coordinate(15.0, 60.0, 70.0))
 
-  async def test_full_protocol_records_one_wire_call_per_operation(self):
-    """A pickup -> aspirate -> dispense -> trash-discard records exactly one
-    wire call each, via the real backend logic."""
+  async def test_full_protocol_sends_one_robot_command_per_operation(self):
+    """A pickup -> aspirate -> dispense -> trash-discard puts exactly one command
+    of each kind on the wire, via the real backend logic."""
     self.plate.get_well("A1").tracker.set_volume(15)
     await self.lh.pick_up_tips(self.tips["A1"])
     await self.lh.aspirate(self.plate["A1"], vols=[10])
     await self.lh.dispense(self.plate["B1"], vols=[10])
     await self.lh.discard_tips()
 
-    names = _names(self.backend)
-    self.assertEqual(names.count("lh.pick_up_tip"), 1)
-    self.assertEqual(names.count("lh.aspirate_in_place"), 1)
-    self.assertEqual(names.count("lh.dispense_in_place"), 1)
+    types = _command_types(self.backend)
+    self.assertEqual(types.count("pickUpTip"), 1)
+    self.assertEqual(types.count("aspirateInPlace"), 1)
+    self.assertEqual(types.count("dispenseInPlace"), 1)
     # api_version defaults to 7.1.0, so the discard routes through the trash addressable area
-    self.assertEqual(names.count("lh.move_to_addressable_area_for_drop_tip"), 1)
-    self.assertEqual(names.count("lh.drop_tip_in_place"), 1)
+    self.assertEqual(types.count("moveToAddressableAreaForDropTip"), 1)
+    self.assertEqual(types.count("dropTipInPlace"), 1)
+
+  async def test_a_pick_up_names_the_well_and_the_pipette_the_robot_needs(self):
+    """The backend builds the wire params itself now, so they are pinned here."""
+    await self.lh.pick_up_tips(self.tips["A1"])
+
+    params = dict(self.backend.commands)["pickUpTip"]
+    self.assertEqual(params["labwareId"], self.backend.get_ot_name("tips"))
+    tip_spot = self.tips.get_item("A1")
+    self.assertEqual(params["wellName"], self.backend.get_ot_name(tip_spot.name))
+    assert self.backend.left_pipette is not None
+    self.assertEqual(params["pipetteId"], self.backend.left_pipette["pipetteId"])
+    self.assertEqual(params["wellLocation"]["origin"], "bottom")
 
   def test_unknown_pipette_name_raises(self):
     """An unrecognised pipette name is rejected at construction."""
