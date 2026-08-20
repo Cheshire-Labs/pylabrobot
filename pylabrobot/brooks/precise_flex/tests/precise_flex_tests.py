@@ -821,16 +821,28 @@ class TestPickAndPlaceAreComposedOfMoves(unittest.IsolatedAsyncioTestCase):
   def _sent(self) -> list[str]:
     return [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
 
-  async def test_a_vertical_pick_goes_above_the_plate_down_and_back_up(self):
+  async def test_a_vertical_pick_goes_above_the_plate_down_and_lifts_it_clear(self):
     await self.arm.pick_up_at_location(
       _PAD_1, direction=2.03, resource_width=80.0,
-      access=StationAccess(clearance=20.0, grasp_offset=15.0),
+      resource_height=14.0, travel_margin=10.0,
+      access=StationAccess(clearance=20.0),
     )
     self.assertEqual(
       self.moves,
-      [(329.9, 80.29, 60.48), (329.9, 80.29, 40.48), (329.9, 80.29, 75.48)],
-      "approach at +clearance, plate, then +clearance+grasp_offset while loaded",
+      [(329.9, 80.29, 60.48), (329.9, 80.29, 40.48), (329.9, 80.29, 64.48)],
+      "approach at +clearance, plate, then up by the resource plus the margin",
     )
+
+  async def test_the_lift_off_a_pick_clears_the_skirt_by_default(self):
+    # Departing at grip height leaves the skirt in the nest for the next traverse to drag.
+    await self.arm.pick_up_at_location(_PAD_1, direction=2.03, resource_width=80.0)
+    self.assertEqual(self.moves[-1], (329.9, 80.29, round(40.476 + 14.35 + 10.0, 2)))
+
+  async def test_the_lift_is_the_caller_s_to_set(self):
+    await self.arm.pick_up_at_location(
+      _PAD_1, direction=2.03, resource_width=80.0, resource_height=44.0, travel_margin=6.0
+    )
+    self.assertEqual(self.moves[-1], (329.9, 80.29, round(40.476 + 50.0, 2)))
 
   async def test_the_jaws_open_before_the_arm_reaches_in(self):
     # Descending onto a plate with the fingers still closed is how you break one.
@@ -860,7 +872,7 @@ class TestPickAndPlaceAreComposedOfMoves(unittest.IsolatedAsyncioTestCase):
     # A shelf is entered along the approach direction, not from above.
     await self.arm.pick_up_at_location(
       Coordinate(300.0, 0.0, 50.0), direction=0.0, resource_width=80.0,
-      access=StationAccess(approach="horizontal", clearance=40.0, z_above=10.0, grasp_offset=15.0),
+      access=StationAccess(approach="horizontal", clearance=40.0, z_above=10.0),
     )
     self.assertEqual(
       self.moves,
@@ -868,15 +880,15 @@ class TestPickAndPlaceAreComposedOfMoves(unittest.IsolatedAsyncioTestCase):
        (300.0, 0.0, 60.0), (260.0, 0.0, 60.0)],
     )
 
-  async def test_a_place_reaches_in_releases_and_leaves_without_the_load_allowance(self):
+  async def test_a_place_reaches_in_releases_and_lifts_the_fingers_clear(self):
+    # The fingers sit around the skirt after opening, so they rise the same way.
     await self.arm.drop_at_location(
-      _PAD_1, direction=2.03,
-      access=StationAccess(clearance=20.0, grasp_offset=15.0),
+      _PAD_1, direction=2.03, resource_height=14.0, travel_margin=10.0,
+      access=StationAccess(clearance=20.0),
     )
     self.assertEqual(
       self.moves,
-      [(329.9, 80.29, 60.48), (329.9, 80.29, 40.48), (329.9, 80.29, 60.48)],
-      "the retreat is empty, so it does not carry the grasp allowance",
+      [(329.9, 80.29, 60.48), (329.9, 80.29, 40.48), (329.9, 80.29, 64.48)],
     )
 
   async def test_a_place_opens_only_far_enough_to_let_go(self):

@@ -39,6 +39,11 @@ _GRIPPER_UNIT_EPS = 1e-6
 _JAW_MARGIN = 5.0
 _NO_PLATE_MARGIN = 2.0
 
+# Leaving a station at grip height keeps the skirt in the nest, so the next traverse drags
+# it. An SBS plate is 14.35 mm tall; the resource plus a margin clears what held it.
+_SBS_PLATE_HEIGHT = 14.35
+_TRAVEL_MARGIN = 10.0
+
 
 # InRange sentinel that lets the controller blend through waypoints instead of stopping at each one.
 BLEND_IN_RANGE = -1
@@ -830,15 +835,15 @@ class PreciseFlex:
     direction: float,
     access: StationAccess,
     orientation: Optional[ElbowOrientation],
-    holding: bool,
+    lift: float,
   ) -> None:
     """Travel from the plate back to clear air, retracing `_reach_in`.
 
-    Carrying a plate needs the extra allowance the station declares for it, so a loaded
-    retreat rises further than an empty one.
+    A vertical station is left by rising clear of it. A shelf is left by rising only the
+    little the station declares, enough for the lip, and then withdrawing level: there is
+    nothing to traverse over inside a hotel, and a full lift would meet the shelf above.
     """
     if access.approach == "vertical":
-      lift = access.clearance + (access.grasp_offset if holding else 0.0)
       await self._move_to(_lift(location, lift), direction, orientation)
       return
     raised = _lift(location, access.z_above)
@@ -2576,7 +2581,7 @@ class PreciseFlex:
 
   @evented_operation(
     "precise_flex.pick_up_at_location",
-    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, orientation=None, rail_position=None: {
+    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, resource_height=_SBS_PLATE_HEIGHT, travel_margin=_TRAVEL_MARGIN, orientation=None, rail_position=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
@@ -2596,6 +2601,8 @@ class PreciseFlex:
     resource_width: float,
     finger_speed_pct: float = 50.0,
     grasp_force: float = 10.0,
+    resource_height: float = _SBS_PLATE_HEIGHT,
+    travel_margin: float = _TRAVEL_MARGIN,
     orientation: Optional[ElbowOrientation] = None,
     rail_position: Optional[float] = None,
     access: Optional[StationAccess] = None,
@@ -2612,9 +2619,11 @@ class PreciseFlex:
       resource_width: Width of the resource to grasp, in mm.
       finger_speed_pct: Finger closing speed as a percentage (0-100).
       grasp_force: Grasp force in Newtons.
-      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). Pins the station's
-        configuration, so passing one while the arm sits on the other elbow sends the
-        pick via the park position. None leaves the branch to the controller.
+      resource_height: Height of the resource in mm. With `travel_margin` it sets how far
+        the arm rises once it has the plate, so the skirt clears whatever held it.
+      travel_margin: Extra mm above `resource_height` on that rise.
+      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). Which elbow branch the
+        approach solves for. None leaves it to whichever is closest.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
       access: How the arm reaches the station and backs out of it. Defaults to a
         vertical approach with 100 mm clearance and 10 mm of allowance for the plate.
@@ -2644,11 +2653,13 @@ class PreciseFlex:
     await self.move_gripper(min(resource_width + _JAW_MARGIN, self.max_gripper_width))
     await self._reach_in(location, direction, access, orientation)
     await self._grip(resource_width)
-    await self._back_out(location, direction, access, orientation, holding=True)
+    await self._back_out(
+      location, direction, access, orientation, lift=resource_height + travel_margin
+    )
 
   @evented_operation(
     "precise_flex.drop_at_location",
-    lambda self, location, direction, orientation=None, rail_position=None: {
+    lambda self, location, direction, resource_height=_SBS_PLATE_HEIGHT, travel_margin=_TRAVEL_MARGIN, orientation=None, rail_position=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
@@ -2662,6 +2673,8 @@ class PreciseFlex:
     self,
     location: Coordinate,
     direction: float,
+    resource_height: float = _SBS_PLATE_HEIGHT,
+    travel_margin: float = _TRAVEL_MARGIN,
     orientation: Optional[ElbowOrientation] = None,
     rail_position: Optional[float] = None,
     access: Optional[StationAccess] = None,
@@ -2675,9 +2688,11 @@ class PreciseFlex:
     Args:
       location: Cartesian location to drop at.
       direction: Approach direction, applied as the pose's z rotation in degrees.
-      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). Pins the station's
-        configuration, so passing one while the arm sits on the other elbow sends the
-        place via the park position. None leaves the branch to the controller.
+      resource_height: Height of the resource in mm. With `travel_margin` it sets how far
+        the fingers rise after opening, so they clear the skirt they were around.
+      travel_margin: Extra mm above `resource_height` on that rise.
+      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). Which elbow branch the
+        approach solves for. None leaves it to whichever is closest.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
       access: How the arm reaches the station and backs out of it. Defaults to a
         vertical approach with 100 mm clearance and 10 mm of allowance for the plate.
@@ -2700,7 +2715,9 @@ class PreciseFlex:
     access = access or StationAccess()
     await self._reach_in(location, direction, access, orientation)
     await self._release()
-    await self._back_out(location, direction, access, orientation, holding=False)
+    await self._back_out(
+      location, direction, access, orientation, lift=resource_height + travel_margin
+    )
 
   # -- parking ------------------------------------------------------------------------------
 
