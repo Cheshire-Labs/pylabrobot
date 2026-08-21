@@ -937,8 +937,7 @@ class PreciseFlex:
       )
     if not envelope.zmin <= location.z <= envelope.zmax:
       raise IKError(
-        f"target z={location.z} is outside the arm's Z travel "
-        f"[{envelope.zmin}, {envelope.zmax}]"
+        f"target z={location.z} is outside the arm's Z travel [{envelope.zmin}, {envelope.zmax}]"
       )
     if location.z + highest_lift > envelope.zmax:
       raise IKError(

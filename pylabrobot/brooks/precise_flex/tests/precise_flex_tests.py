@@ -829,8 +829,11 @@ class TestPickAndPlaceAreComposedOfMoves(unittest.IsolatedAsyncioTestCase):
 
   async def test_a_vertical_pick_goes_above_the_plate_down_and_lifts_it_clear(self):
     await self.arm.pick_up_at_location(
-      _PAD_1, direction=2.03, resource_width=80.0,
-      resource_height=14.0, travel_margin=10.0,
+      _PAD_1,
+      direction=2.03,
+      resource_width=80.0,
+      resource_height=14.0,
+      travel_margin=10.0,
       access=StationAccess(clearance=20.0, grasp_offset=0.0),
     )
     self.assertEqual(
@@ -843,13 +846,18 @@ class TestPickAndPlaceAreComposedOfMoves(unittest.IsolatedAsyncioTestCase):
     # Departing at grip height leaves the skirt in the nest for the next traverse to drag.
     await self.arm.pick_up_at_location(_PAD_1, direction=2.03, resource_width=80.0)
     self.assertEqual(
-      self.moves[-1], (329.9, 80.29, round(40.476 + 14.35 + 10.0 + 10.0, 2)),
+      self.moves[-1],
+      (329.9, 80.29, round(40.476 + 14.35 + 10.0 + 10.0, 2)),
       "the resource, the travel margin, and the station's loaded allowance",
     )
 
   async def test_the_lift_is_the_caller_s_to_set(self):
     await self.arm.pick_up_at_location(
-      _PAD_1, direction=2.03, resource_width=80.0, resource_height=44.0, travel_margin=6.0,
+      _PAD_1,
+      direction=2.03,
+      resource_width=80.0,
+      resource_height=44.0,
+      travel_margin=6.0,
       access=StationAccess(grasp_offset=0.0),
     )
     self.assertEqual(self.moves[-1], (329.9, 80.29, round(40.476 + 50.0, 2)))
@@ -858,7 +866,11 @@ class TestPickAndPlaceAreComposedOfMoves(unittest.IsolatedAsyncioTestCase):
     # An operator raises grasp_offset because that nest is deep; a fixed lift leaves the
     # plate still inside it when the traverse starts.
     await self.arm.pick_up_at_location(
-      _PAD_1, direction=2.03, resource_width=80.0, resource_height=14.0, travel_margin=10.0,
+      _PAD_1,
+      direction=2.03,
+      resource_width=80.0,
+      resource_height=14.0,
+      travel_margin=10.0,
       access=StationAccess(clearance=20.0, grasp_offset=60.0),
     )
     self.assertEqual(self.moves[-1], (329.9, 80.29, round(40.476 + 14.0 + 10.0 + 60.0, 2)))
@@ -867,7 +879,10 @@ class TestPickAndPlaceAreComposedOfMoves(unittest.IsolatedAsyncioTestCase):
     # Nothing is being carried out of the nest after a release, so the allowance for a
     # held plate does not apply.
     await self.arm.drop_at_location(
-      _PAD_1, direction=2.03, resource_height=14.0, travel_margin=10.0,
+      _PAD_1,
+      direction=2.03,
+      resource_height=14.0,
+      travel_margin=10.0,
       access=StationAccess(clearance=20.0, grasp_offset=60.0),
     )
     self.assertEqual(self.moves[-1], (329.9, 80.29, 64.48))
@@ -911,19 +926,29 @@ class TestPickAndPlaceAreComposedOfMoves(unittest.IsolatedAsyncioTestCase):
   async def test_a_horizontal_pick_stands_off_comes_in_lifts_and_backs_out(self):
     # A shelf is entered along the approach direction, not from above.
     await self.arm.pick_up_at_location(
-      Coordinate(300.0, 0.0, 50.0), direction=0.0, resource_width=80.0,
+      Coordinate(300.0, 0.0, 50.0),
+      direction=0.0,
+      resource_width=80.0,
       access=StationAccess(approach="horizontal", clearance=40.0, z_above=10.0),
     )
     self.assertEqual(
       self.moves,
-      [(260.0, 0.0, 60.0), (260.0, 0.0, 50.0), (300.0, 0.0, 50.0),
-       (300.0, 0.0, 60.0), (260.0, 0.0, 60.0)],
+      [
+        (260.0, 0.0, 60.0),
+        (260.0, 0.0, 50.0),
+        (300.0, 0.0, 50.0),
+        (300.0, 0.0, 60.0),
+        (260.0, 0.0, 60.0),
+      ],
     )
 
   async def test_a_place_reaches_in_releases_and_lifts_the_fingers_clear(self):
     # The fingers sit around the skirt after opening, so they rise the same way.
     await self.arm.drop_at_location(
-      _PAD_1, direction=2.03, resource_height=14.0, travel_margin=10.0,
+      _PAD_1,
+      direction=2.03,
+      resource_height=14.0,
+      travel_margin=10.0,
       access=StationAccess(clearance=20.0),
     )
     self.assertEqual(
@@ -1015,7 +1040,9 @@ class TestPickTargetIsCheckedBeforeItMoves(unittest.IsolatedAsyncioTestCase):
     # would mean failing with the plate already in the jaws.
     with self.assertRaises(IKError):
       await self.arm.pick_up_at_location(
-        Coordinate(300.0, 80.0, 395.0), direction=0.0, resource_width=80.0,
+        Coordinate(300.0, 80.0, 395.0),
+        direction=0.0,
+        resource_width=80.0,
         access=StationAccess(clearance=2.0, grasp_offset=20.0),
       )
     self.assertFalse(self._sent(), "nothing should reach the controller")
@@ -1025,7 +1052,8 @@ class TestPickTargetIsCheckedBeforeItMoves(unittest.IsolatedAsyncioTestCase):
     # a station near the top of the travel must not be refused for it.
     with patch.object(self.arm, "move_to_location", AsyncMock()):
       await self.arm.drop_at_location(
-        Coordinate(300.0, 80.0, 395.0), direction=0.0,
+        Coordinate(300.0, 80.0, 395.0),
+        direction=0.0,
         access=StationAccess(approach="horizontal", clearance=100.0, z_above=3.0),
       )
 
@@ -1160,9 +1188,7 @@ class TestPickAndPlaceEventsCarryTheStationAccess(unittest.IsolatedAsyncioTestCa
 
     with patch.object(arm, "move_to_location", AsyncMock()):
       with use_event_bus(event_bus):
-        await arm.drop_at_location(
-          _PAD_1, direction=2.03, access=StationAccess(clearance=20.0)
-        )
+        await arm.drop_at_location(_PAD_1, direction=2.03, access=StationAccess(clearance=20.0))
 
     self.assertEqual(events[0].name, "precise_flex.drop_at_location.started")
 
@@ -1172,13 +1198,13 @@ class TestPickAndPlaceEventsCarryTheStationAccess(unittest.IsolatedAsyncioTestCa
     event_bus = EventBus()
     event_bus.subscribe(events.append)
 
-    with patch.object(arm, "move_to_location", AsyncMock()), patch.object(
-      arm, "_set_speed", AsyncMock()
-    ), patch.object(arm, "_request_speed", AsyncMock(return_value=100.0)):
+    with (
+      patch.object(arm, "move_to_location", AsyncMock()),
+      patch.object(arm, "_set_speed", AsyncMock()),
+      patch.object(arm, "_request_speed", AsyncMock(return_value=100.0)),
+    ):
       with use_event_bus(event_bus):
-        await arm.pick_up_at_location(
-          _PAD_1, direction=2.03, resource_width=80.0, speed_pct=20.0
-        )
+        await arm.pick_up_at_location(_PAD_1, direction=2.03, resource_width=80.0, speed_pct=20.0)
 
     self.assertEqual(events[0].name, "precise_flex.pick_up_at_location.started")
     self.assertEqual(events[0].data["speed_pct"], 20.0)
@@ -1189,9 +1215,11 @@ class TestPickAndPlaceEventsCarryTheStationAccess(unittest.IsolatedAsyncioTestCa
     event_bus = EventBus()
     event_bus.subscribe(events.append)
 
-    with patch.object(arm, "move_to_location", AsyncMock()), patch.object(
-      arm, "_set_speed", AsyncMock()
-    ), patch.object(arm, "_request_speed", AsyncMock(return_value=100.0)):
+    with (
+      patch.object(arm, "move_to_location", AsyncMock()),
+      patch.object(arm, "_set_speed", AsyncMock()),
+      patch.object(arm, "_request_speed", AsyncMock(return_value=100.0)),
+    ):
       with use_event_bus(event_bus):
         await arm.drop_at_location(_PAD_1, direction=2.03, speed_pct=15.0)
 
@@ -1228,9 +1256,7 @@ class TestAMoveCanRunAtItsOwnSpeed(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(self.speeds, [], "a move with no speed of its own must not write one")
 
   async def test_a_pick_at_its_own_speed_puts_the_prior_speed_back(self):
-    await self.arm.pick_up_at_location(
-      _PAD_1, direction=2.03, resource_width=80.0, speed_pct=20.0
-    )
+    await self.arm.pick_up_at_location(_PAD_1, direction=2.03, resource_width=80.0, speed_pct=20.0)
 
     self.assertEqual(self.speeds, [20.0, 100.0])
 
@@ -1250,9 +1276,7 @@ class TestAMoveCanRunAtItsOwnSpeed(unittest.IsolatedAsyncioTestCase):
     with patch.object(
       self.arm, "move_rail", AsyncMock(side_effect=lambda mm: order.append("rail"))
     ):
-      await self.arm.drop_at_location(
-        _PAD_1, direction=2.03, rail_position=120.0, speed_pct=15.0
-      )
+      await self.arm.drop_at_location(_PAD_1, direction=2.03, rail_position=120.0, speed_pct=15.0)
 
     self.assertEqual(order, ["speed=15.0", "rail", "speed=100.0"])
 
