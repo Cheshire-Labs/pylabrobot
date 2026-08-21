@@ -37,25 +37,39 @@ def _flex_head8() -> Tuple[OpentronsFlex, ChatterboxTransport, FlexHead8]:
 
 
 class TestRunLiveness(unittest.TestCase):
-  """run_is_current tells 'the operator took the robot' apart from 'the wire broke'."""
+  """run_is_live tells 'the operator took the robot' apart from 'the wire broke'."""
 
   def test_our_open_run_reads_current(self):
     flex, _, _ = _flex_head8()
     try:
-      self.assertTrue(asyncio.run(flex.run_is_current()))
+      self.assertTrue(asyncio.run(flex.run_is_live()))
     finally:
       asyncio.run(flex.disconnect())
 
   def test_no_run_reads_not_current_without_a_wire_read(self):
     transport = ChatterboxTransport(pipettes=[("p50_multi_flex", 8, 1.0, 50.0, "left")])
     flex = OpentronsFlex(deck=FlexDeck(), host="localhost", transport=transport)
-    self.assertFalse(asyncio.run(flex.run_is_current()))
+    self.assertFalse(asyncio.run(flex.run_is_live()))
 
   def test_an_externally_ended_run_reads_not_current(self):
     flex, transport, _ = _flex_head8()
     try:
       transport.end_run_externally()
-      self.assertFalse(asyncio.run(flex.run_is_current()))
+      self.assertFalse(asyncio.run(flex.run_is_live()))
+    finally:
+      asyncio.run(flex.disconnect())
+
+  def test_a_stopped_run_still_marked_current_reads_dead(self):
+    """The robot-server clears ``current`` only on delete or supersession; a
+    touchscreen STOP leaves the run stopped-but-current, so liveness must key
+    on the terminal status, never on ``current`` alone."""
+    flex, transport, _ = _flex_head8()
+    try:
+      transport.end_run_externally()
+      run = asyncio.run(transport.get(f"/runs/{flex.run_id}"))["data"]
+      self.assertTrue(run["current"])
+      self.assertEqual(run["status"], "stopped")
+      self.assertFalse(asyncio.run(flex.run_is_live()))
     finally:
       asyncio.run(flex.disconnect())
 
