@@ -551,7 +551,10 @@ class OpentronsFlex(OpentronsRobot):
 
     definition = self._build_labware_definition(resource, grip_distance_from_top, allow_stub)
     assert self.run_id is not None, "No active run. Call setup() first."
-    data = await self._post(f"/runs/{self.run_id}/labware_definitions", {"data": definition})
+    try:
+      data = await self._post(f"/runs/{self.run_id}/labware_definitions", {"data": definition})
+    except Exception as wire_error:
+      await self._reraise_run_aware(wire_error)
     uri = cast(str, data["data"]["definitionUri"])
     namespace, load_name, version = uri.split("/")
     self._defined_labware[name] = (namespace, load_name, int(version))

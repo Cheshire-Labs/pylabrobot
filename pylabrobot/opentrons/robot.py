@@ -3,7 +3,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, NoReturn, Optional, cast
 
 from pylabrobot.opentrons.transport import HttpxTransport, OpentronsTransport
 
@@ -40,6 +40,28 @@ class OpentronsError(Exception):
   def __init__(self, title: str, message: Optional[str] = None) -> None:
     self.title, self.message = title, message
     super().__init__(f"{title}: {message}" if message else title)
+
+
+class OpentronsRunNotCurrentError(OpentronsError):
+  """The robot no longer holds the run this object opened.
+
+  The touchscreen only works while no run is current, so an operator recovering
+  the robot at the instrument stops our run before anything else. Every
+  run-scoped identity (pipette ids, labware ids, uploaded definitions, the
+  engine's tip record) died with it, which is why this is its own type rather
+  than a generic wire failure: the remedy is not a retry but a session rebuild
+  (``create_run()`` then ``initialize()``), after which tip bookkeeping must be
+  reconciled against the hardware sensor.
+  """
+
+  def __init__(self, run_id: Optional[str]) -> None:
+    super().__init__(
+      "Run no longer current",
+      f"run {run_id!r} is not the robot's current run (an operator likely took the "
+      "robot at the instrument). Rebuild the session with create_run() + initialize(), "
+      "then reconcile tip state against the hardware sensor.",
+    )
+    self.run_id = run_id
 
 
 class OpentronsCommandError(RuntimeError):
@@ -303,6 +325,39 @@ class OpentronsRobot(abc.ABC):
     logger.info("Created run %s", self.run_id)
     return run_id
 
+  async def run_is_current(self) -> bool:
+    """Whether the robot still holds the run this object opened.
+
+    One ``GET /runs/{id}``, no motion. ``False`` with no run open, and ``False``
+    when the robot reports the run is no longer current -- which is what an
+    operator recovering at the instrument leaves behind, since the touchscreen
+    only works while no run is current. A stopped run still answers this read
+    (the robot keeps the record); wire failures propagate rather than being
+    read as "not current", so an unreachable robot is not mistaken for a
+    taken-over one.
+    """
+    if self.run_id is None:
+      return False
+    data = await self._get(f"/runs/{self.run_id}")
+    return bool(data.get("data", {}).get("current", False))
+
+  async def _reraise_run_aware(self, wire_error: Exception) -> NoReturn:
+    """Re-raise a run-scoped wire failure, typed when the run died under us.
+
+    The robot-server refuses requests against a non-current run at the HTTP
+    layer, whose error carries no type a caller can react to. One liveness
+    read classifies it; when that read itself fails the original error stands,
+    so an unreachable robot keeps its own failure rather than a wrong "run
+    died" story.
+    """
+    try:
+      alive = await self.run_is_current()
+    except Exception:
+      raise wire_error
+    if not alive:
+      raise OpentronsRunNotCurrentError(self.run_id) from wire_error
+    raise wire_error
+
   async def _cancel_run(self) -> None:
     """Cancel the current run. Safe to call if no run is active."""
     if self.run_id is None:
@@ -363,7 +418,10 @@ class OpentronsRobot(abc.ABC):
         "intent": "setup",
       }
     }
-    result = await self._post(f"/runs/{self.run_id}/commands", payload)
+    try:
+      result = await self._post(f"/runs/{self.run_id}/commands", payload)
+    except Exception as wire_error:
+      await self._reraise_run_aware(wire_error)
     cmd_data: Dict[str, Any] = result.get("data", {})
 
     if not wait:
@@ -377,7 +435,10 @@ class OpentronsRobot(abc.ABC):
     # during the last sleep succeeded, and calling that a timeout aborts a real move.
     deadline = time.monotonic() + timeout
     while True:
-      resp = await self._get(f"/runs/{self.run_id}/commands/{cmd_id}")
+      try:
+        resp = await self._get(f"/runs/{self.run_id}/commands/{cmd_id}")
+      except Exception as wire_error:
+        await self._reraise_run_aware(wire_error)
       cmd_data = resp.get("data", {})
       status = cmd_data.get("status", "")
       if status == "succeeded":
