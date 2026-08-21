@@ -312,14 +312,16 @@ class ChatterboxTransport:
     """Model an operator taking the robot at the instrument.
 
     The touchscreen only works while no run is current, so any at-instrument
-    recovery stops our run first. After this the run reads ``current: false``
-    and commands POSTed to it are refused, like the robot-server's 409. The
-    simulated tip-presence sensors are untouched: whether the operator also
-    dropped the tips is the test's own question (set ``_tip_detected``).
+    recovery stops our run first. Mirrors the robot-server faithfully: a STOP
+    leaves the run ``current: true`` (only a delete or a superseding run clears
+    that) while its ``status`` goes terminal, and commands POSTed to it are
+    refused like the server's 409 -- so liveness readers must key on status,
+    never on ``current`` alone. The simulated tip-presence sensors are
+    untouched: whether the operator also dropped the tips is the test's own
+    question (``set_tip_detected``).
     """
     if self._current_run_id is not None:
       self._dead_run_ids.add(self._current_run_id)
-      self._current_run_id = None
 
   async def setup(self) -> None:
     """No connection to open."""
@@ -455,11 +457,8 @@ class ChatterboxTransport:
       run_id = f"chatterbox-run-{self._run_count}"
       self._current_run_id = run_id
       return {"data": {"id": run_id}}
-    if path.endswith("/actions"):  # run stop
-      run_id = path.split("/")[2]
-      self._dead_run_ids.add(run_id)
-      if self._current_run_id == run_id:
-        self._current_run_id = None
+    if path.endswith("/actions"):  # run stop: terminal status, but still current
+      self._dead_run_ids.add(path.split("/")[2])
       return {"data": {}}
     if path.endswith("/labware_definitions"):  # custom labware definition upload
       self._refuse_dead_run(path)
@@ -523,7 +522,7 @@ class ChatterboxTransport:
           mount = self._pipette_id_to_mount.get(params.get("pipetteId"))
           if mount is not None:
             self._tip_detected[mount] = not self.simulate_failed_pickup
-        elif ctype in ("dropTip", "dropTipInPlace"):
+        elif ctype in ("dropTip", "dropTipInPlace", "unsafe/dropTipInPlace"):
           mount = self._pipette_id_to_mount.get(params.get("pipetteId"))
           if mount is not None:
             self._tip_detected[mount] = self.simulate_stuck_tip

@@ -31,6 +31,7 @@ from typing import (
   Final,
   FrozenSet,
   List,
+  Literal,
   Optional,
   Sequence,
   Set,
@@ -64,6 +65,12 @@ if TYPE_CHECKING:
   from pylabrobot.opentrons.flex import OpentronsFlex
 
 logger = logging.getLogger(__name__)
+
+# What reconcile_tips_with_hardware can report; the matching RECONCILE_*
+# constants live with the other module constants below.
+TipReconcileOutcome = Literal[
+  "in_sync", "cleared_lost_tips", "untracked_tip_present", "unverified"
+]
 
 
 class _FlexHead:
@@ -927,7 +934,7 @@ class _FlexHead:
       {"pipetteId": self.pipette_id, "expectedState": expected_state},
     )
 
-  async def reconcile_tips_with_hardware(self) -> str:
+  async def reconcile_tips_with_hardware(self) -> TipReconcileOutcome:
     """Make this head's tip bookkeeping answer to the hardware sensor.
 
     One sensor reading per mount (see ``has_tip_on_hardware``), no motion. The

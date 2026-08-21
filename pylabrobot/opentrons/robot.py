@@ -22,6 +22,10 @@ DEFAULT_COMMAND_TIMEOUT = 120.0
 # Delay between two reads of a running command's status.
 DEFAULT_STATUS_POLL_INTERVAL = 0.2
 
+# Run statuses that accept no further commands. "stop-requested" is included:
+# a run on its way down refuses new work the same as one already stopped.
+_TERMINAL_RUN_STATUSES = frozenset({"stopped", "failed", "succeeded", "stop-requested"})
+
 
 def _plunger_seconds(params: Dict[str, Any]) -> float:
   """How long a command's own plunger travel takes, from its volume and rate.
@@ -325,37 +329,44 @@ class OpentronsRobot(abc.ABC):
     logger.info("Created run %s", self.run_id)
     return run_id
 
-  async def run_is_current(self) -> bool:
-    """Whether the robot still holds the run this object opened.
+  async def run_is_live(self) -> bool:
+    """Whether the run this object opened still accepts commands.
 
     One ``GET /runs/{id}``, no motion. ``False`` with no run open, and ``False``
-    when the robot reports the run is no longer current -- which is what an
-    operator recovering at the instrument leaves behind, since the touchscreen
-    only works while no run is current. A stopped run still answers this read
+    when the robot reports the run superseded or in a terminal status. BOTH
+    reads matter: the robot-server clears ``current`` only when a run is
+    deleted or another run supersedes it -- an operator who merely STOPS our
+    run at the touchscreen leaves it stopped-but-still-current, so ``current``
+    alone would read a dead run as live. A stopped run still answers this read
     (the robot keeps the record); wire failures propagate rather than being
-    read as "not current", so an unreachable robot is not mistaken for a
-    taken-over one.
+    read as dead, so an unreachable robot is not mistaken for a taken-over one.
     """
     if self.run_id is None:
       return False
-    data = await self._get(f"/runs/{self.run_id}")
-    return bool(data.get("data", {}).get("current", False))
+    run = (await self._get(f"/runs/{self.run_id}")).get("data", {})
+    if not run.get("current", False):
+      return False
+    return run.get("status") not in _TERMINAL_RUN_STATUSES
 
   async def _reraise_run_aware(self, wire_error: Exception) -> NoReturn:
     """Re-raise a run-scoped wire failure, typed when the run died under us.
 
-    The robot-server refuses requests against a non-current run at the HTTP
-    layer, whose error carries no type a caller can react to. One liveness
-    read classifies it; when that read itself fails the original error stands,
-    so an unreachable robot keeps its own failure rather than a wrong "run
-    died" story.
+    The robot-server refuses requests against a dead run at the HTTP layer,
+    whose error carries no type a caller can react to. One liveness read
+    classifies it; when that read itself fails, or no run was open to begin
+    with (nothing external can have killed it), the original error stands, so
+    an unreachable robot keeps its own failure rather than a wrong "run died"
+    story.
     """
+    run_id = self.run_id
+    if run_id is None:
+      raise wire_error
     try:
-      alive = await self.run_is_current()
+      alive = await self.run_is_live()
     except Exception:
       raise wire_error
     if not alive:
-      raise OpentronsRunNotCurrentError(self.run_id) from wire_error
+      raise OpentronsRunNotCurrentError(run_id) from wire_error
     raise wire_error
 
   async def _cancel_run(self) -> None:
