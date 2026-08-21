@@ -1165,3 +1165,58 @@ class TestPickAndPlaceEventsCarryTheStationAccess(unittest.IsolatedAsyncioTestCa
         )
 
     self.assertEqual(events[0].name, "precise_flex.drop_at_location.started")
+
+
+class TestAMoveCanRunAtItsOwnSpeed(unittest.IsolatedAsyncioTestCase):
+  """A slow move must not leave the arm slow for everything that follows."""
+
+  def setUp(self):
+    self.arm = _make_arm()
+    for name in ("_reach_in", "_back_out", "_grip", "_release", "_open_to", "_set_grasp_data"):
+      patcher = patch.object(self.arm, name, AsyncMock())
+      patcher.start()
+      self.addCleanup(patcher.stop)
+
+    self.speeds: list[float] = []
+
+    async def record_set(pct: float) -> None:
+      self.speeds.append(pct)
+
+    for name, mock in (
+      ("_set_speed", AsyncMock(side_effect=record_set)),
+      ("_request_speed", AsyncMock(return_value=100.0)),
+    ):
+      patcher = patch.object(self.arm, name, mock)
+      patcher.start()
+      self.addCleanup(patcher.stop)
+
+  async def test_no_speed_asked_for_leaves_the_profile_untouched(self):
+    await self.arm.pick_up_at_location(_PAD_1, direction=2.03, resource_width=80.0)
+
+    self.assertEqual(self.speeds, [], "a move with no speed of its own must not write one")
+
+  async def test_a_pick_at_its_own_speed_puts_the_prior_speed_back(self):
+    await self.arm.pick_up_at_location(
+      _PAD_1, direction=2.03, resource_width=80.0, speed_pct=20.0
+    )
+
+    self.assertEqual(self.speeds, [20.0, 100.0])
+
+  async def test_a_place_at_its_own_speed_puts_the_prior_speed_back(self):
+    await self.arm.drop_at_location(_PAD_1, direction=2.03, speed_pct=15.0)
+
+    self.assertEqual(self.speeds, [15.0, 100.0])
+
+  async def test_a_fault_mid_move_still_puts_the_prior_speed_back(self):
+    mocked(self.arm._grip).side_effect = PreciseFlexError(
+      0, "the gripper closed with nothing in it"
+    )
+
+    with self.assertRaises(PreciseFlexError):
+      await self.arm.pick_up_at_location(
+        _PAD_1, direction=2.03, resource_width=80.0, speed_pct=20.0
+      )
+
+    self.assertEqual(
+      self.speeds, [20.0, 100.0], "a fault between the move and the restore strands the arm slow"
+    )
