@@ -8,6 +8,7 @@ from typing import Optional
 
 import pytest
 import websockets
+import websockets.asyncio.server
 
 from pylabrobot.__version__ import STANDARD_FORM_JSON_VERSION
 from pylabrobot.resources import (
@@ -198,6 +199,28 @@ class VisualizerShowMachineToolsTests(unittest.IsolatedAsyncioTestCase):
       )
 
     await vis.stop()
+
+
+class VisualizerStartupFailureTests(unittest.IsolatedAsyncioTestCase):
+  """A websocket server that never binds used to hang `setup()` outright.
+
+  The caller spins on a lock only a started server releases, and the port search
+  had no end, so a machine with no free port turned into a wait with nothing to
+  read and no way out. Both ends are bounded now.
+  """
+
+  async def test_setup_gives_up_instead_of_spinning_when_no_port_binds(self):
+    vis = Visualizer(Resource(size_x=100, size_y=100, size_z=100, name="root"), open_browser=False)
+    with (
+      unittest.mock.patch("pylabrobot.visualizer.visualizer._WS_SERVER_START_SECONDS", 2.0),
+      unittest.mock.patch.object(
+        websockets.asyncio.server, "serve", side_effect=OSError("address already in use")
+      ),
+    ):
+      with self.assertRaises(RuntimeError) as caught:
+        await vis.setup()
+
+    self.assertIn("did not start", str(caught.exception))
 
 
 class VisualizerCommandTests(unittest.IsolatedAsyncioTestCase):

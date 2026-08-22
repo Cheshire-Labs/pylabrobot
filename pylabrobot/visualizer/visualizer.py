@@ -25,6 +25,12 @@ except ImportError as e:
 from pylabrobot.__version__ import STANDARD_FORM_JSON_VERSION
 from pylabrobot.resources import Resource
 
+_WS_PORT_ATTEMPTS = 100
+"""How many consecutive ports the websocket server tries before giving up."""
+
+_WS_SERVER_START_SECONDS = 30.0
+"""How long `setup()` waits for that server before saying it did not start."""
+
 logger = logging.getLogger(__name__)
 
 
@@ -496,6 +502,7 @@ class Visualizer:
 
     async def run_server():
       self._stop_ = self.loop.create_future()
+      taken = 0
       while True:
         try:
           async with websockets.asyncio.server.serve(self._socket_handler, self.host, self.ws_port):
@@ -506,7 +513,12 @@ class Visualizer:
         except asyncio.CancelledError:
           pass
         except OSError:
-          # If the port is in use, try the next port.
+          # If the port is in use, try the next port -- but not forever. The
+          # caller is spinning on a lock only a started server releases, so an
+          # endless search shows up as a hang with nothing to read.
+          taken += 1
+          if taken >= _WS_PORT_ATTEMPTS:
+            break
           self.ws_port += 1
 
     def start_loop():
@@ -519,7 +531,13 @@ class Visualizer:
     self._t = threading.Thread(target=start_loop, daemon=True)
     self.t.start()
 
+    deadline = time.monotonic() + _WS_SERVER_START_SECONDS
     while lock.locked():
+      if time.monotonic() > deadline:
+        raise RuntimeError(
+          f"The visualizer's websocket server did not start within "
+          f"{_WS_SERVER_START_SECONDS:.0f}s. The last port it tried was {self.ws_port}."
+        )
       time.sleep(0.001)
 
   def _run_file_server(self):
