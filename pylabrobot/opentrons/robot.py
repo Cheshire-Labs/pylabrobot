@@ -12,15 +12,8 @@ logger = logging.getLogger(__name__)
 # Seconds of polling a command gets on top of however long its own motion takes.
 COMMAND_POLL_HEADROOM = 30.0
 
-# One request/response with the robot-server. A read of robot state, not a motion.
-DEFAULT_REQUEST_TIMEOUT = 30.0
-
-# One command, including the motion it performs. Above the slowest single move this
-# class wraps: a gripper labware move (pick, travel, place) runs to about two minutes.
-DEFAULT_COMMAND_TIMEOUT = 120.0
-
 # Delay between two reads of a running command's status.
-DEFAULT_STATUS_POLL_INTERVAL = 0.2
+_STATUS_POLL_INTERVAL = 0.2
 
 # Run statuses that accept no further commands: a run on its way down refuses
 # new work the same as one already stopped.
@@ -128,54 +121,12 @@ class OpentronsRobot(abc.ABC):
     host: str,
     port: int = 31950,
     transport: Optional[OpentronsTransport] = None,
-    request_timeout: Optional[float] = None,
-    command_timeout: float = DEFAULT_COMMAND_TIMEOUT,
-    status_poll_interval: float = DEFAULT_STATUS_POLL_INTERVAL,
   ) -> None:
-    """Build a robot handle. Nothing is contacted until ``setup()``.
-
-    Args:
-      host: the robot's address.
-      port: the robot-server's port.
-      transport: wire transport to use instead of a real one, for offline runs.
-      request_timeout: how long one request/response may take, in seconds. Only a
-        transport this robot builds itself can carry it, so passing it alongside a
-        ``transport`` is refused; give that transport the budget instead. The
-        attribute reads ``None`` when a transport came in: the budget is that
-        transport's, and this object does not know it.
-      command_timeout: how long to poll a command before giving up, in seconds. A
-        command that names its own motion time gets ``max(command_timeout, motion +
-        COMMAND_POLL_HEADROOM)``.
-      status_poll_interval: delay between two command-status reads, in seconds.
-    """
-    if transport is not None and request_timeout is not None:
-      raise ValueError(
-        "request_timeout does not reach an injected transport. Build the transport "
-        "with the budget you want, e.g. HttpxTransport(base_url, timeout=...)."
-      )
-    for name, value in (
-      ("request_timeout", request_timeout),
-      ("command_timeout", command_timeout),
-      ("status_poll_interval", status_poll_interval),
-    ):
-      if value is not None and value <= 0:
-        raise ValueError(f"{name} must be greater than 0, got {value}")
     self.host, self.port = host, port
     self.base_url = f"http://{host}:{port}"
-    self.command_timeout = command_timeout
-    self.status_poll_interval = status_poll_interval
     # Built here rather than on connect: a pylabrobot io refuses construction
     # once a capture is armed, so a robot built first can still be recorded.
-    if transport is None:
-      self.request_timeout: Optional[float] = (
-        DEFAULT_REQUEST_TIMEOUT if request_timeout is None else request_timeout
-      )
-      self._transport: OpentronsTransport = HttpxTransport(
-        base_url=self.base_url, timeout=self.request_timeout
-      )
-    else:
-      self.request_timeout = None
-      self._transport = transport
+    self._transport: OpentronsTransport = transport or HttpxTransport(base_url=self.base_url)
     self.run_id: Optional[str] = None
     self.pipette: Optional[PipetteInfo] = None
     self.api_version: Optional[str] = None
@@ -296,7 +247,7 @@ class OpentronsRobot(abc.ABC):
     command_type: str,
     params: Optional[Dict[str, Any]] = None,
     wait: bool = True,
-    timeout: Optional[float] = None,
+    timeout: float = 30.0,
   ) -> Dict[str, Any]:
     """Send any robot command by name, for the parts of the robot this class does not wrap.
 
@@ -412,7 +363,7 @@ class OpentronsRobot(abc.ABC):
     command_type: str,
     params: Dict[str, Any],
     wait: bool = True,
-    timeout: Optional[float] = None,
+    timeout: float = 30.0,
   ) -> Dict[str, Any]:
     """Execute a command within the current run.
 
@@ -425,7 +376,7 @@ class OpentronsRobot(abc.ABC):
         "aspirateInPlace", "pickUpTip", "loadLabware".
       params: Command-specific parameters.
       wait: If True, poll until completion.
-      timeout: Max seconds to wait. Defaults to the robot's ``command_timeout``.
+      timeout: Max seconds to wait.
 
     Returns:
       The completed command data dict (includes "result" field).
@@ -435,8 +386,6 @@ class OpentronsRobot(abc.ABC):
       RuntimeError: If the command times out.
     """
     assert self.run_id is not None, "No active run. Call create_run() first."
-    if timeout is None:
-      timeout = self.command_timeout
     # Headroom rides on a command's own motion time; it is not a floor under a
     # command that has none, or no budget below it could ever be set.
     motion = _plunger_seconds(params)
@@ -479,7 +428,7 @@ class OpentronsRobot(abc.ABC):
       remaining = deadline - time.monotonic()
       if remaining <= 0:
         raise RuntimeError(f"Opentrons command '{command_type}' timed out after {timeout}s")
-      await asyncio.sleep(min(self.status_poll_interval, remaining))
+      await asyncio.sleep(min(_STATUS_POLL_INTERVAL, remaining))
 
   # --- Instrument Discovery ---
 
