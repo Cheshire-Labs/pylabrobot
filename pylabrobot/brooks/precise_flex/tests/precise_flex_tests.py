@@ -837,7 +837,7 @@ class TestAMoveCanRunAtItsOwnSpeed(unittest.IsolatedAsyncioTestCase):
 
   def setUp(self):
     self.arm = _make_arm()
-    for name in ("_pick_plate_c", "_place_plate_c", "_set_grasp_data"):
+    for name in ("_pick_plate_c", "_place_plate_c", "set_grasp_data"):
       patcher = patch.object(self.arm, name, AsyncMock())
       patcher.start()
       self.addCleanup(patcher.stop)

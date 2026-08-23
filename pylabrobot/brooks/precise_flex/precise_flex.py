@@ -1221,7 +1221,7 @@ class PreciseFlex:
     return await self.request_profile_speed(self.profile_index)
 
   @asynccontextmanager
-  async def _at_speed(self, speed_pct: Optional[float]) -> AsyncIterator[None]:
+  async def at_speed(self, speed_pct: Optional[float]) -> AsyncIterator[None]:
     """Run a move at its own speed, then put the profile speed back.
 
     The restore belongs here rather than with the caller: a fault between the move
@@ -1411,7 +1411,7 @@ class PreciseFlex:
       raise PreciseFlexError(-1, "Unexpected response format from GraspData command.")
     return (float(parts[0]), float(parts[1]), float(parts[2]))
 
-  async def _set_grasp_data(
+  async def set_grasp_data(
     self, plate_width: float, finger_speed_pct: float, grasp_force: float
   ) -> None:
     """Set the data to be used for the next force-controlled PickPlate command grip operation.
@@ -2628,7 +2628,7 @@ class PreciseFlex:
       position,
       resource_width,
     )
-    await self._set_grasp_data(
+    await self.set_grasp_data(
       plate_width=resource_width,
       finger_speed_pct=finger_speed_pct,
       grasp_force=grasp_force,
@@ -2726,10 +2726,10 @@ class PreciseFlex:
       orientation=orientation,
       wrist=wrist,
     )
-    async with self._at_speed(speed_pct):
+    async with self.at_speed(speed_pct):
       if rail_position is not None:
         await self.move_rail(rail_position)
-      await self._set_grasp_data(
+      await self.set_grasp_data(
         plate_width=resource_width,
         finger_speed_pct=finger_speed_pct,
         grasp_force=grasp_force,
@@ -2794,7 +2794,7 @@ class PreciseFlex:
       orientation=orientation,
       wrist=wrist,
     )
-    async with self._at_speed(speed_pct):
+    async with self.at_speed(speed_pct):
       if rail_position is not None:
         await self.move_rail(rail_position)
       await self._place_plate_c(cartesian_position=coords)
