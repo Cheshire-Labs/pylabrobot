@@ -6,7 +6,6 @@ import logging
 import time
 import warnings
 from contextlib import asynccontextmanager
-from math import cos, hypot, radians, sin
 from typing import (
   AsyncIterator,
   Callable,
@@ -20,7 +19,7 @@ from typing import (
 )
 
 from pylabrobot.brooks.precise_flex import kinematics
-from pylabrobot.brooks.precise_flex.config import Axis, PreciseFlexConfiguration, StationAccess
+from pylabrobot.brooks.precise_flex.config import Axis, PreciseFlexConfiguration
 from pylabrobot.brooks.precise_flex.kinematics import JointPose
 from pylabrobot.events import coordinate_reference, emit_event, evented_operation
 from pylabrobot.io.socket import Socket
@@ -36,7 +35,7 @@ from .confirmed_firmware_versions import (
 from .data_ids import DataID, PowerState
 from .errors import OutOfRangeOfMotionError, PreciseFlexError
 from .interrupt import halt_and_resync, halt_on_interrupt
-from .kinematics import ElbowOrientation, IKError, PreciseFlexCartesianPose, Wrist
+from .kinematics import ElbowOrientation, PreciseFlexCartesianPose, Wrist
 from .tcs_modules import missing_required_modules
 
 logger = logging.getLogger(__name__)
@@ -45,24 +44,6 @@ logger = logging.getLogger(__name__)
 # was derived from.
 _GRIPPER_UNIT_EPS = 1e-6
 _GRIPPER_LIMIT_HEADROOM = 0.5
-"""How far inside its soft limits a commanded gripper target is held, in axis units.
-
-The servo overshoots: commanding the advertised maximum landed the axis at 134.062
-against a limit of 134.0, and the controller then refused every move until the arm
-was homed. Nothing gains from driving to the exact end, so no caller is allowed to."""
-
-# Both in gripper-axis units, relative to the calibrated grip position. Opening is a small
-# step off the plate rather than a sweep to the stop, which is a long move to no purpose.
-# 14 clears an SBS skirt by a few mm a side: measured on the bench, a grip position of 75.5
-# and an opening of 14 puts the jaws at 89.5, which passes a plate without catching it.
-_JAW_OPENING = 14.0
-# A plate holds the jaws open past the commanded grip; empty jaws settle on it.
-_PLATE_PRESENT_MARGIN = 2.0
-
-# Leaving a station at grip height keeps the skirt in the nest, so the next traverse drags
-# it. An SBS plate is 14.35 mm tall; the resource plus a margin clears what held it.
-_SBS_PLATE_HEIGHT = 14.35
-_TRAVEL_MARGIN = 10.0
 
 
 # InRange sentinel that lets the controller blend through waypoints instead of stopping at each one.
@@ -85,27 +66,6 @@ def _joint_pose_reference(position: JointPose) -> dict[str, float]:
     (axis.name.lower() if isinstance(axis, Axis) else str(axis)): float(value)
     for axis, value in position.items()
   }
-
-
-def _lift(location: Coordinate, mm: float) -> Coordinate:
-  return Coordinate(location.x, location.y, location.z + mm)
-
-
-def _back_off(location: Coordinate, direction: float, mm: float) -> Coordinate:
-  """Straight back along the approach direction, the way a shelf is entered and left."""
-  yaw = radians(direction)
-  return Coordinate(location.x - mm * cos(yaw), location.y - mm * sin(yaw), location.z)
-
-
-def _highest_lift(access: StationAccess, retreat_lift: float) -> float:
-  """The most a pick or place rises above the plate, for the pre-flight to check.
-
-  A vertical station is approached from `clearance` and left by the retreat, whichever is
-  higher. A shelf only ever rises by `z_above`, on both legs.
-  """
-  if access.approach == "vertical":
-    return max(access.clearance, retreat_lift)
-  return access.z_above
 
 
 def _cartesian_target_reference(
@@ -256,7 +216,10 @@ class PreciseFlex:
     self.io = Socket(human_readable_device_name="Precise Flex Arm", host=host, port=port)
     self.timeout = timeout
     self.profile_index: int = 1
+    self.location_index: int = 1
     self._rail_position_index = 1
+    self.horizontal_compliance: bool = False
+    self.horizontal_compliance_torque: int = 0
     self._has_rail = has_rail
     self._is_dual_gripper = is_dual_gripper
     self.closed_gripper_position = closed_gripper_position
@@ -833,124 +796,56 @@ class PreciseFlex:
     """
     await self.send_command(f"MoveOneAxis {int(axis)} {position} {self.profile_index}")
 
-  async def _move_to(
+  async def _move_to_stored_location(self, location_index: int, profile_index: int) -> None:
+    """Move to the location specified by the station index using the specified profile.
+
+    Args:
+      location_index: The index of the location to which the robot moves.
+      profile_index: The profile index for this move.
+
+    Note:
+      Requires that the robot be attached.
+    """
+    await self.send_command(f"move {location_index} {profile_index}")
+
+  async def _move_to_stored_location_appro(self, location_index: int, profile_index: int) -> None:
+    """Approach the location specified by the station index using the specified profile.
+
+    This is similar to `_move_to_stored_location` except that the Z clearance value is included.
+
+    Args:
+      location_index: The index of the location to which the robot moves.
+      profile_index: The profile index for this move.
+
+    Note:
+      Requires that the robot be attached.
+    """
+    await self.send_command(f"moveAppro {location_index} {profile_index}")
+
+  async def _set_joint_angles(
     self,
-    location: Coordinate,
-    direction: float,
-    orientation: Optional[ElbowOrientation],
-    rail_position: Optional[float],
+    location_index: int,
+    joint_position: JointPose,
   ) -> None:
-    """One leg of a pick or place, through the same guarded move any other travel uses.
-
-    Every leg carries the rail position, because a rail-equipped arm refuses a Cartesian
-    move that does not say where the rail belongs.
-    """
-    await self.move_to_location(
-      location, direction, orientation=orientation, rail_position=rail_position
-    )
-
-  async def _reach_in(
-    self,
-    location: Coordinate,
-    direction: float,
-    access: StationAccess,
-    orientation: Optional[ElbowOrientation],
-    rail_position: Optional[float],
-  ) -> None:
-    """Travel from clear air onto the plate, by the route the station's geometry allows.
-
-    A vertical station is entered from directly above. A horizontal one is a shelf: stand
-    off along the approach direction, come in level, and only then close the last gap.
-    """
-    if access.approach == "vertical":
-      await self._move_to(_lift(location, access.clearance), direction, orientation, rail_position)
-      await self._move_to(location, direction, orientation, rail_position)
-      return
-    standoff = _back_off(location, direction, access.clearance)
-    await self._move_to(_lift(standoff, access.z_above), direction, orientation, rail_position)
-    await self._move_to(standoff, direction, orientation, rail_position)
-    await self._move_to(location, direction, orientation, rail_position)
-
-  async def _back_out(
-    self,
-    location: Coordinate,
-    direction: float,
-    access: StationAccess,
-    orientation: Optional[ElbowOrientation],
-    rail_position: Optional[float],
-    lift: float,
-  ) -> None:
-    """Travel from the plate back to clear air, retracing `_reach_in`.
-
-    A vertical station is left by rising clear of it. A shelf is left by rising only the
-    little the station declares, enough for the lip, and then withdrawing level: there is
-    nothing to traverse over inside a hotel, and a full lift would meet the shelf above.
-    """
-    if access.approach == "vertical":
-      await self._move_to(_lift(location, lift), direction, orientation, rail_position)
-      return
-    raised = _lift(location, access.z_above)
-    await self._move_to(raised, direction, orientation, rail_position)
-    await self._move_to(
-      _back_off(raised, direction, access.clearance), direction, orientation, rail_position
-    )
-
-  async def _grip(self, plate_present_margin: float) -> None:
-    """Close to the calibrated grip position and check something is actually in the jaws.
-
-    The commanded position is `closed_gripper_position`, which is where a held plate wants
-    the fingers. Commanding tighter and letting the plate stop them holds a standing
-    position error, and the controller reads sustained torque as an overheating motor
-    (-3104) rather than as a grip.
-    """
-    await self.move_gripper_joint_position(self.closed_gripper_position, force_sensing=True)
-    joints = await self.request_joint_position()
-    if joints[Axis.GRIPPER] < self.closed_gripper_position + plate_present_margin:
-      raise PreciseFlexError(
-        -1,
-        f"the gripper closed to {joints[Axis.GRIPPER]:.1f} with nothing in it: a held resource "
-        f"keeps the jaws more than {plate_present_margin:.1f} above the grip position "
-        f"({self.closed_gripper_position:.1f}). If something IS in the jaws, that pair is wrong "
-        f"for this resource - the width of the face being gripped is what decides both.",
+    """Set joint angles for stored location, handling rail configuration."""
+    if self._has_rail:
+      await self.send_command(
+        f"locAngles {location_index} "
+        f"{joint_position[Axis.RAIL]} "
+        f"{joint_position[Axis.BASE]} "
+        f"{joint_position[Axis.SHOULDER]} "
+        f"{joint_position[Axis.ELBOW]} "
+        f"{joint_position[Axis.WRIST]} "
+        f"{joint_position[Axis.GRIPPER]}"
       )
-
-  async def _release(self, jaw_opening: float) -> None:
-    """Open a step off the plate, rather than sweeping the fingers to the stop."""
-    joints = await self.request_joint_position()
-    await self._open_to(joints[Axis.GRIPPER] + jaw_opening)
-
-  async def _open_to(self, position: float) -> None:
-    """Open the jaws to a gripper-axis position, held inside the axis limits."""
-    await self.move_gripper_joint_position(position, force_sensing=False)
-
-  def _assert_within_work_envelope(
-    self, location: Coordinate, rail_position: float, highest_lift: float
-  ) -> None:
-    """Refuse an unreachable station before the controller starts moving toward it.
-
-    The controller-run pick had no pre-flight of its own, so without this an out-of-reach
-    target faults part way through a motion instead of failing on the call - and the lift is
-    checked as well as the grip point, because a retreat that leaves the Z travel would fail
-    with a plate already in the jaws. Reach is the grip point only, against the yaw-free TCP
-    annulus, so this is a cheap refusal and the per-leg IK still has the final say.
-    """
-    if self._configuration is None:
-      return
-    envelope = self._configuration.work_envelope
-    reach = hypot(location.x - rail_position, location.y)
-    if not envelope.inner <= reach <= envelope.outer:
-      raise IKError(
-        f"target at reach {reach:.1f} mm is outside the arm's annulus "
-        f"[{envelope.inner:.1f}, {envelope.outer:.1f}]"
-      )
-    if not envelope.zmin <= location.z <= envelope.zmax:
-      raise IKError(
-        f"target z={location.z} is outside the arm's Z travel [{envelope.zmin}, {envelope.zmax}]"
-      )
-    if location.z + highest_lift > envelope.zmax:
-      raise IKError(
-        f"rising {highest_lift} mm above z={location.z} reaches "
-        f"{location.z + highest_lift}, past the top of the arm's Z travel {envelope.zmax}"
+    else:
+      await self.send_command(
+        f"locAngles {location_index} "
+        f"{joint_position[Axis.BASE]} "
+        f"{joint_position[Axis.SHOULDER]} "
+        f"{joint_position[Axis.ELBOW]} "
+        f"{joint_position[Axis.WRIST]} "
+        f"{joint_position[Axis.GRIPPER]}"
       )
 
   async def _cart_to_joints(self, cart: PreciseFlexCartesianPose) -> JointPose:
@@ -1537,6 +1432,10 @@ class PreciseFlex:
       raise ValueError(f"finger_speed_pct must be between 0 and 100, got {finger_speed_pct}")
     await self.send_command(f"GraspData {plate_width} {finger_speed_pct} {grasp_force}")
 
+  async def _set_grip_detail(self):
+    """Set the grip detail for the current location."""
+    await self.send_command(f"StationType {self.location_index} 1 0 100 0 10")
+
   def _mm_to_firmware_units(self, width_mm: float) -> float:
     """Convert a jaw width (mm) to the firmware's native position unit.
 
@@ -1897,11 +1796,11 @@ class PreciseFlex:
   def _adopt_configuration(self, config: "PreciseFlexConfiguration") -> None:
     """Adopt the discovered configuration as the source of truth for later commands.
 
-    The gripper width limits are converted off the gripper-axis soft limits, IK/FK
-    use the device link lengths, and the rail / dual-gripper command paths follow
-    the axes the controller actually reports.
+    The gripper width limits come from the gripper-axis soft limits, IK/FK use the
+    device link lengths, and the rail / dual-gripper command paths follow the axes
+    the controller actually reports.
     """
-    gmin, gmax = config.gripper_axis_limits
+    gmin, gmax = config.gripper_width_range
     self._gripper_soft_min, self._gripper_soft_max = gmin, gmax
     # The limits are gripper-axis units. Both ends convert through the anchor: copying
     # them in would put units in a millimetre field and change what a width means.
@@ -2094,8 +1993,9 @@ class PreciseFlex:
     if outside:
       raise OutOfRangeOfMotionError(
         f"axis outside its soft limit after setup: {self._fmt_axes(outside)}. The controller rejects all "
-        f"commanded moves in this state. {self._recovery_advice(outside)} Freedrive the axis back into "
-        f"range by hand when it is far past its limit, and always for the wrist.",
+        f"commanded moves in this state. Recover with recover_axes_within_limits(), or freedrive "
+        f"the axis back into range manually (required for the wrist, or when an axis is far past "
+        f"its limit).",
         axes=outside,
       )
 
@@ -2114,23 +2014,6 @@ class PreciseFlex:
       if value is not None and not (lo <= value <= hi):
         outside[axis] = (value, (lo, hi))
     return outside
-
-  @staticmethod
-  def _recovery_advice(axes: Dict[Axis, tuple]) -> str:
-    """What actually gets these axes back inside their limits.
-
-    The rotary axes are absolute, so homing re-reads the same out-of-range value and
-    changes nothing. The gripper is the exception: it has no brake, so it drops out of
-    range whenever the motors lose power, and homing does re-seat it.
-    """
-    advice = ["Call recover_axes_within_limits() to drive them back into range."]
-    if Axis.GRIPPER in axes:
-      advice.append(
-        "Homing also re-seats the gripper: it has no brake, so it falls when the motors lose power."
-      )
-    if any(axis is not Axis.GRIPPER for axis in axes):
-      advice.append("Homing will not recover the other axes (the rotary axes are absolute).")
-    return " ".join(advice)
 
   @staticmethod
   def _fmt_axes(axes: Dict[Axis, tuple]) -> str:
@@ -2159,7 +2042,8 @@ class PreciseFlex:
     if out_of_range:
       raise OutOfRangeOfMotionError(
         f"axis out of range: {self._fmt_axes(out_of_range)}. The controller rejects every commanded "
-        f"move while an axis is out of range. {self._recovery_advice(out_of_range)}",
+        f"move while an axis is out of range. Homing will not recover it (the rotary axes are "
+        f"absolute); call recover_axes_within_limits() to drive it back into range.",
         axes=out_of_range,
       )
     for axis, (value, limit) in self._axes_outside_soft_limits(target).items():
@@ -2560,20 +2444,6 @@ class PreciseFlex:
   _gripper_soft_min: Optional[float] = None
   _gripper_soft_max: Optional[float] = None
 
-  def open_position(self, jaw_opening: Optional[float] = None) -> float:
-    """Where the jaws stand off the calibrated grip position, in gripper-axis units.
-
-    What an open with no width in it should reach for. The stops are a long move to no
-    purpose, and driving to one is what strands the axis outside its limits.
-
-    `jaw_opening` is how far off the grip position the caller wants the jaws. An
-    integration that tracks its own per-labware opening passes it here, so the arm
-    opens by the same number it picks with; `_JAW_OPENING` is only what this arm
-    answers when nobody says.
-    """
-    opening = _JAW_OPENING if jaw_opening is None else jaw_opening
-    return self.closed_gripper_position + opening
-
   @evented_operation(
     "precise_flex.move_gripper",
     lambda self, width, force_sensing=False: {
@@ -2590,9 +2460,8 @@ class PreciseFlex:
     """Move the PreciseFlex gripper jaws.
 
     ``force_sensing=False`` drives to the open position (``gripper 1``);
-    ``force_sensing=True`` drives to the close position (``gripper 2``). Both are position
-    moves: the plug-in documents its force-controlled grip as belonging to ``PickPlate``,
-    so commanding past a held object holds a standing error rather than yielding to it.
+    ``force_sensing=True`` drives to the close position with force feedback
+    (``gripper 2``), which may stop short of ``width`` on contact.
 
     Not interruptible: the ``gripper`` firmware command blocks the controller's command interpreter
     until the jaws finish (hardware-verified, like ``waitForEom``), so a user interrupt cannot halt it
@@ -2729,13 +2598,79 @@ class PreciseFlex:
   # -- pick & place -------------------------------------------------------------------------
 
   @evented_operation(
+    "precise_flex.pick_up_at_joint_position",
+    lambda self, position, resource_width, finger_speed_pct=50.0, grasp_force=10.0: {
+      "device": _controller_reference(self),
+      "target_joint_position": _joint_pose_reference(position),
+      "resource_width": float(resource_width),
+      "finger_speed_pct": float(finger_speed_pct),
+      "grasp_force": float(grasp_force),
+    },
+  )
+  async def pick_up_at_joint_position(
+    self,
+    position: JointPose,
+    resource_width: float,
+    finger_speed_pct: float = 50.0,
+    grasp_force: float = 10.0,
+  ) -> None:
+    """Pick up at the specified joint position.
+
+    Args:
+      position: Joint pose to pick from.
+      resource_width: Width of the resource to grasp, in mm.
+      finger_speed_pct: Finger closing speed as a percentage (0-100).
+      grasp_force: Grasp force in Newtons.
+    """
+    logger.info(
+      "[PreciseFlex %s] pick_up: joints=%s, resource_width_mm=%s",
+      self.io._host,
+      position,
+      resource_width,
+    )
+    await self._set_grasp_data(
+      plate_width=resource_width,
+      finger_speed_pct=finger_speed_pct,
+      grasp_force=grasp_force,
+    )
+    await self._pick_plate_j(position)
+
+  @evented_operation(
+    "precise_flex.drop_at_joint_position",
+    lambda self, position, resource_width: {
+      "device": _controller_reference(self),
+      "target_joint_position": _joint_pose_reference(position),
+      "resource_width": float(resource_width),
+    },
+  )
+  async def drop_at_joint_position(
+    self,
+    position: JointPose,
+    resource_width: float,
+  ) -> None:
+    """Drop at the specified joint position.
+
+    Args:
+      position: Joint pose to drop at.
+      resource_width: Width of the held resource, in mm.
+    """
+    logger.info(
+      "[PreciseFlex %s] drop: joints=%s, resource_width_mm=%s",
+      self.io._host,
+      position,
+      resource_width,
+    )
+    await self._place_plate_j(position)
+
+  @evented_operation(
     "precise_flex.pick_up_at_location",
-    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, resource_height=_SBS_PLATE_HEIGHT, travel_margin=_TRAVEL_MARGIN, jaw_opening=_JAW_OPENING, plate_present_margin=_PLATE_PRESENT_MARGIN, orientation=None, rail_position=None, access=None, speed_pct=None: {
+    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, orientation=None, wrist=None, rail_position=None, speed_pct=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
         direction,
         orientation=orientation,
+        wrist=wrist,
         rail_position=rail_position,
       ),
       "resource_width": float(resource_width),
@@ -2751,20 +2686,12 @@ class PreciseFlex:
     resource_width: float,
     finger_speed_pct: float = 50.0,
     grasp_force: float = 10.0,
-    resource_height: float = _SBS_PLATE_HEIGHT,
-    travel_margin: float = _TRAVEL_MARGIN,
-    jaw_opening: float = _JAW_OPENING,
-    plate_present_margin: float = _PLATE_PRESENT_MARGIN,
     orientation: Optional[ElbowOrientation] = None,
+    wrist: Optional[Wrist] = None,
     rail_position: Optional[float] = None,
-    access: Optional[StationAccess] = None,
     speed_pct: Optional[float] = None,
   ) -> None:
     """Pick up at the specified Cartesian location.
-
-    The controller solves the pose and runs the approach, so the wrist branch is its
-    choice: a station carries an elbow configuration and has nowhere to record which way
-    a level wrist turned.
 
     Args:
       location: Cartesian location to pick from.
@@ -2772,26 +2699,13 @@ class PreciseFlex:
       resource_width: Width of the resource to grasp, in mm.
       finger_speed_pct: Finger closing speed as a percentage (0-100).
       grasp_force: Grasp force in Newtons.
-      resource_height: Height of the resource in mm. With `travel_margin` and the station's
-        `grasp_offset` it sets how far the arm rises once it has the plate, so the skirt
-        clears whatever held it.
-      travel_margin: Extra mm above `resource_height` on that rise.
-      jaw_opening: Gripper-axis units to stand off the grip position before reaching in.
-      plate_present_margin: Gripper-axis units a resource must hold the jaws above the
-        grip position for the pick to count as having caught something.
-      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). Which elbow branch the
-        approach solves for. None leaves it to whichever is closest.
+      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). If None, the robot
+        picks the closest configuration.
+      wrist: Wrist configuration. If None, the robot picks the closest configuration.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
-      access: How the arm reaches the station and backs out of it. Defaults to a
-        vertical approach with 100 mm clearance and 10 mm of loaded lift allowance.
       speed_pct: Run this one pick at this percentage of full speed, restoring the
         prior speed afterwards. None leaves the arm's current speed alone. Unlike
         ``move_to_location``, this does NOT stick: the speed is scoped to this call.
-
-    ``resource_width``, ``finger_speed_pct`` and ``grasp_force`` go out verbatim as
-    ``GraspData``, which the vendor documents as feeding ``PickPlate`` alone. Whether the
-    plain ``gripper 2`` close reads any of it is unconfirmed on the arm; the close commands
-    ``closed_gripper_position`` either way, so none of the three changes where it stops.
     """
     logger.info(
       "[PreciseFlex %s] pick_up: x=%s, y=%s, z=%s, direction=%s, resource_width_mm=%s",
@@ -2806,10 +2720,11 @@ class PreciseFlex:
       raise ValueError(
         "rail_position must be specified for pick_up_at_location when using a rail-equipped arm."
       )
-    access = access or StationAccess()
-    loaded_lift = resource_height + travel_margin + access.grasp_offset
-    self._assert_within_work_envelope(
-      location, rail_position or 0.0, _highest_lift(access, loaded_lift)
+    coords = PreciseFlexCartesianPose(
+      location=location,
+      rotation=Rotation(z=direction),
+      orientation=orientation,
+      wrist=wrist,
     )
     async with self._at_speed(speed_pct):
       if rail_position is not None:
@@ -2819,36 +2734,20 @@ class PreciseFlex:
         finger_speed_pct=finger_speed_pct,
         grasp_force=grasp_force,
       )
-      await self._open_to(self.closed_gripper_position + jaw_opening)
-      await self._reach_in(location, direction, access, orientation, rail_position)
-      try:
-        await self._grip(plate_present_margin)
-      except PreciseFlexError:
-        # Failing with the arm still down in the nest leaves it there for whatever runs next.
-        # Empty jaws, so the loaded allowance does not apply.
-        await self._back_out(
-          location,
-          direction,
-          access,
-          orientation,
-          rail_position,
-          lift=resource_height + travel_margin,
-        )
-        raise
-      await self._back_out(
-        location, direction, access, orientation, rail_position, lift=loaded_lift
-      )
+      await self._pick_plate_c(cartesian_position=coords)
 
   @evented_operation(
     "precise_flex.drop_at_location",
-    lambda self, location, direction, resource_height=_SBS_PLATE_HEIGHT, travel_margin=_TRAVEL_MARGIN, jaw_opening=_JAW_OPENING, orientation=None, rail_position=None, access=None, speed_pct=None: {
+    lambda self, location, direction, resource_width, orientation=None, wrist=None, rail_position=None, speed_pct=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
         direction,
         orientation=orientation,
+        wrist=wrist,
         rail_position=rail_position,
       ),
+      "resource_width": float(resource_width),
       "speed_pct": speed_pct,
     },
   )
@@ -2856,66 +2755,79 @@ class PreciseFlex:
     self,
     location: Coordinate,
     direction: float,
-    resource_height: float = _SBS_PLATE_HEIGHT,
-    travel_margin: float = _TRAVEL_MARGIN,
-    jaw_opening: float = _JAW_OPENING,
+    resource_width: float,
     orientation: Optional[ElbowOrientation] = None,
+    wrist: Optional[Wrist] = None,
     rail_position: Optional[float] = None,
-    access: Optional[StationAccess] = None,
     speed_pct: Optional[float] = None,
   ) -> None:
     """Drop at the specified Cartesian location.
 
-    Takes no resource width: the jaws are already around the plate by the time it is being
-    placed, and the release opens off wherever the plate is holding them. The wrist branch
-    is the controller's choice, as for a pick.
-
     Args:
       location: Cartesian location to drop at.
       direction: Approach direction, applied as the pose's z rotation in degrees.
-      resource_height: Height of the resource in mm. With `travel_margin` it sets how far
-        the fingers rise after opening, so they clear the skirt they were around. The
-        station's `grasp_offset` is not added here: the jaws are empty by then.
-      travel_margin: Extra mm above `resource_height` on that rise.
-      jaw_opening: Gripper-axis units to open off the plate when letting go.
-      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). Which elbow branch the
-        approach solves for. None leaves it to whichever is closest.
+      resource_width: Width of the held resource, in mm.
+      orientation: Elbow orientation (``"lefty"`` or ``"righty"``). If None, the robot
+        picks the closest configuration.
+      wrist: Wrist configuration. If None, the robot picks the closest configuration.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
-      access: How the arm reaches the station and backs out of it. Defaults to a
-        vertical approach with 100 mm clearance.
       speed_pct: Run this one place at this percentage of full speed, restoring the
         prior speed afterwards. None leaves the arm's current speed alone. Unlike
         ``move_to_location``, this does NOT stick: the speed is scoped to this call.
     """
     logger.info(
-      "[PreciseFlex %s] drop: x=%s, y=%s, z=%s, direction=%s",
+      "[PreciseFlex %s] drop: x=%s, y=%s, z=%s, direction=%s, resource_width_mm=%s",
       self.io._host,
       location.x,
       location.y,
       location.z,
       direction,
+      resource_width,
     )
     if rail_position is None and self._has_rail:
       raise ValueError(
         "rail_position must be specified for drop_at_location when using a rail-equipped arm."
       )
-    access = access or StationAccess()
-    self._assert_within_work_envelope(
-      location, rail_position or 0.0, _highest_lift(access, resource_height + travel_margin)
+    coords = PreciseFlexCartesianPose(
+      location=location,
+      rotation=Rotation(z=direction),
+      orientation=orientation,
+      wrist=wrist,
     )
     async with self._at_speed(speed_pct):
       if rail_position is not None:
         await self.move_rail(rail_position)
-      await self._reach_in(location, direction, access, orientation, rail_position)
-      await self._release(jaw_opening)
-      await self._back_out(
-        location,
-        direction,
-        access,
-        orientation,
-        rail_position,
-        lift=resource_height + travel_margin,
-      )
+      await self._place_plate_c(cartesian_position=coords)
+
+  async def _pick_plate_j(self, joint_position: JointPose):
+    """Pick a plate from the specified position using joint coordinates."""
+    await self._set_joint_angles(self.location_index, joint_position)
+    await self._set_grip_detail()
+    horizontal_compliance_int = 1 if self.horizontal_compliance else 0
+    ret_code = await self.send_command(
+      f"pickplate {self.location_index} {horizontal_compliance_int} {self.horizontal_compliance_torque}"
+    )
+    if ret_code == "0":
+      raise PreciseFlexError(-1, "the force-controlled gripper detected no plate present.")
+
+  async def _place_plate_j(self, joint_position: JointPose):
+    """Place a plate at the specified position using joint coordinates."""
+    await self._set_joint_angles(self.location_index, joint_position)
+    await self._set_grip_detail()
+    horizontal_compliance_int = 1 if self.horizontal_compliance else 0
+    await self.send_command(
+      f"placeplate {self.location_index} {horizontal_compliance_int} {self.horizontal_compliance_torque}"
+    )
+
+  async def _pick_plate_c(self, cartesian_position: PreciseFlexCartesianPose):
+    """Pick a plate at a Cartesian position via IK + joint-space pickplate."""
+    joints = await self._cart_to_joints(cartesian_position)
+    await self._pick_plate_j(joints)
+
+  async def _place_plate_c(self, cartesian_position: PreciseFlexCartesianPose):
+    """Place a plate at a Cartesian position via IK + joint-space placeplate."""
+    joints = await self._cart_to_joints(cartesian_position)
+    await self._place_plate_j(joints)
 
   # -- parking ------------------------------------------------------------------------------
 
