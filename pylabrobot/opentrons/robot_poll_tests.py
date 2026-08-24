@@ -8,7 +8,8 @@ here fires before the dispatcher's and takes the decision away from the operator
 
 import time
 import unittest
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+from unittest.mock import patch
 
 from pylabrobot.opentrons.flex import OpentronsFlex
 from pylabrobot.opentrons.robot import (
@@ -138,11 +139,22 @@ class CommandPollTests(unittest.IsolatedAsyncioTestCase):
 
     self.assertIn("timed out after 0.2s", str(caught.exception))
 
-  async def test_the_poll_interval_paces_the_status_reads(self):
-    transport = _ScriptedStatusTransport()
-    robot = _flex(transport, command_timeout=0.4, status_poll_interval=0.01)
+  async def test_the_poll_interval_is_the_delay_between_two_status_reads(self):
+    """A deployment on a slow link turns the rate down so it stops hammering the
+    robot-server, and a fixed delay in here would ignore it.
 
-    with self.assertRaises(RuntimeError):
-      await robot.send_command("home", {})
+    Asserted on the delays asked for rather than on how many reads fit in a wall-clock
+    window, which counts how busy the machine is as much as it counts the rate.
+    """
+    transport = _ScriptedStatusTransport(succeed_after=3)
+    robot = _flex(transport, command_timeout=60.0, status_poll_interval=0.05)
+    slept: List[float] = []
 
-    self.assertGreater(transport.status_reads, 10)
+    async def record(seconds: float) -> None:
+      slept.append(seconds)
+
+    with patch("asyncio.sleep", record):
+      await robot._execute_command("home", {})
+
+    self.assertEqual(transport.status_reads, 4)
+    self.assertEqual(slept, [0.05, 0.05, 0.05])
