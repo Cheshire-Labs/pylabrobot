@@ -53,19 +53,21 @@ _CHANNELS_TO_HEAD: Dict[int, Type[_FlexHead]] = {
 def _corner_offset_z(definition: Dict[str, Any]) -> Optional[float]:
   """How far above its slot a definition puts the labware's origin.
 
-  Schema 2 states it outright. Schema 3 dropped the field and states the same
-  distance as the labware's own back-left-bottom extent. A definition doing
-  neither is not read as zero: that would put every well's floor exactly one
-  unknown offset out.
+  Schema 2 states it in ``cornerOffsetFromSlot``. Schema 3 dropped the field and
+  puts the labware origin on the slot, so the distance is zero -- its ``extents``
+  are a bounding box measured from that origin, which is a different quantity and
+  not a stand-in for this one. A schema this driver has not been taught answers
+  None rather than zero, because reading it as zero would put every well floor
+  out by however far the labware really sits above its slot.
   """
-  corner = definition.get("cornerOffsetFromSlot")
-  if isinstance(corner, dict) and "z" in corner:
-    return float(corner["z"])
-  extents = definition.get("extents")
-  if isinstance(extents, dict):
-    back_left_bottom = extents.get("total", {}).get("backLeftBottom", {})
-    if isinstance(back_left_bottom, dict) and "z" in back_left_bottom:
-      return float(back_left_bottom["z"])
+  version = definition.get("schemaVersion")
+  if version == 2:
+    corner = definition.get("cornerOffsetFromSlot")
+    if isinstance(corner, dict) and "z" in corner:
+      return float(corner["z"])
+    return None
+  if version == 3:
+    return 0.0
   return None
 
 
@@ -462,9 +464,9 @@ class OpentronsFlex(OpentronsRobot):
     if loaded.corner_offset_z is None:
       raise OpentronsError(
         "Labware geometry unknown",
-        f"the definition loaded for '{resource.name}' states how far it sits above its "
-        "slot in a form this driver does not read, so a floor derived from it would be "
-        "wrong by that distance.",
+        f"the definition loaded for '{resource.name}' says how far it sits above its slot "
+        "in a schema this driver does not read, so a floor derived from it would be wrong "
+        "by that distance.",
       )
     if loaded.offset_id is not None:
       raise OpentronsError(

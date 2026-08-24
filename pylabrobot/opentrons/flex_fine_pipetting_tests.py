@@ -366,11 +366,13 @@ _NEST_FLOOR_Z = 2.31
 _ROBOT_DEFINITIONS: Dict[str, Dict[str, Any]] = {
   _NEST_RESERVOIR: {
     "parameters": {"loadName": _NEST_RESERVOIR},
+    "schemaVersion": 2,
     "cornerOffsetFromSlot": {"x": 0, "y": 0, "z": 0},
     "wells": {"A1": {"z": _NEST_FLOOR_Z, "depth": 25.0}},
   },
   _CORNING_FLAT: {
     "parameters": {"loadName": _CORNING_FLAT},
+    "schemaVersion": 2,
     "cornerOffsetFromSlot": {"x": 0, "y": 0, "z": 0},
     "wells": {
       f"{row}{col}": {"z": _CORNING_WELL_FLOOR_Z, "depth": 10.668}
@@ -1584,7 +1586,6 @@ class TestUnsafeRecoveryOps(unittest.TestCase):
       asyncio.run(flex.stop())
 
 
-
 class TestContainerAndSingleNozzleProbes(unittest.TestCase):
   """The two probe shapes the heads had no way to reach.
 
@@ -1756,14 +1757,15 @@ class TestWellBottomDeckZ(unittest.TestCase):
     finally:
       asyncio.run(flex.stop())
 
-
   def test_every_term_of_the_sum_reaches_the_answer(self):
     """The floor is where the labware sits, plus how far the definition lifts its
-    origin above the slot, plus the well's own depth into it. All three were zero
-    in the fixtures above, so dropping any of them went unnoticed."""
+    origin above the slot, plus how far the well's own floor sits above that
+    origin. All three were zero in the fixtures above, so dropping any of them
+    went unnoticed."""
     lifted = {
       _NEST_RESERVOIR: {
         "parameters": {"loadName": _NEST_RESERVOIR},
+        "schemaVersion": 2,
         "cornerOffsetFromSlot": {"x": 0, "y": 0, "z": 4.0},
         "wells": {"A1": {"z": 2.5, "depth": 25.0}},
       }
@@ -1777,19 +1779,22 @@ class TestWellBottomDeckZ(unittest.TestCase):
       self.assertAlmostEqual(flex.well_bottom_deck_z(trough, "A1"), slot_z + 4.0 + 2.5)
 
       trough.location = Coordinate(trough.location.x, trough.location.y, trough.location.z + 10.0)
-      self.assertAlmostEqual(
-        flex.well_bottom_deck_z(trough, "A1"), slot_z + 10.0 + 4.0 + 2.5
-      )
+      self.assertAlmostEqual(flex.well_bottom_deck_z(trough, "A1"), slot_z + 10.0 + 4.0 + 2.5)
     finally:
       asyncio.run(flex.stop())
 
-  def test_it_reads_a_schema_3_definition_that_states_the_offset_as_an_extent(self):
-    """Schema 3 dropped ``cornerOffsetFromSlot`` and states the same distance as
-    the labware's back-left-bottom extent."""
+  def test_a_schema_3_definition_puts_its_origin_on_the_slot(self):
+    """Schema 3 has no ``cornerOffsetFromSlot``: the labware origin IS the slot
+    origin, so the floor is the slot plus the well's own z and nothing else.
+
+    Its ``extents`` are not that distance under another name. The schema states
+    them "relative to the labware origin", which is the thing being located, and
+    a nonzero one here would show up as a floor that many mm too high."""
     schema3 = {
       _NEST_RESERVOIR: {
         "parameters": {"loadName": _NEST_RESERVOIR},
-        "extents": {"total": {"backLeftBottom": {"x": 0, "y": 0, "z": 4.0}}},
+        "schemaVersion": 3,
+        "extents": {"total": {"backLeftBottom": {"x": -3.0, "y": 3.0, "z": 4.0}}},
         "wells": {"A1": {"z": 2.5, "depth": 25.0}},
       }
     }
@@ -1799,16 +1804,38 @@ class TestWellBottomDeckZ(unittest.TestCase):
       asyncio.run(flex._ensure_labware_loaded(trough))
       slot_z = trough.get_absolute_location(z="b").z
 
-      self.assertAlmostEqual(flex.well_bottom_deck_z(trough, "A1"), slot_z + 4.0 + 2.5)
+      self.assertAlmostEqual(flex.well_bottom_deck_z(trough, "A1"), slot_z + 2.5)
     finally:
       asyncio.run(flex.stop())
 
-  def test_it_refuses_a_definition_that_states_the_offset_in_neither_form(self):
-    """Reading a missing offset as zero would put every floor out by however far
-    the labware actually sits above its slot."""
+  def test_it_refuses_a_schema_it_has_not_been_taught(self):
+    """Reading an unknown schema as zero would put every floor out by however far
+    that schema says the labware sits above its slot."""
+    schema4 = {
+      _NEST_RESERVOIR: {
+        "parameters": {"loadName": _NEST_RESERVOIR},
+        "schemaVersion": 4,
+        "wells": {"A1": {"z": 2.5, "depth": 25.0}},
+      }
+    }
+    flex, _transport, _head = _flex_head1(robot_labware_definitions=schema4)
+    try:
+      trough = self._trough_on_deck(flex)
+      asyncio.run(flex._ensure_labware_loaded(trough))
+
+      with self.assertRaises(OpentronsError) as caught:
+        flex.well_bottom_deck_z(trough, "A1")
+      self.assertIn("does not read", str(caught.exception))
+    finally:
+      asyncio.run(flex.stop())
+
+  def test_it_refuses_a_schema_2_definition_that_never_states_the_offset(self):
+    """The field is required by schema 2, so one without it is a definition this
+    driver cannot place -- not one sitting on its slot."""
     silent = {
       _NEST_RESERVOIR: {
         "parameters": {"loadName": _NEST_RESERVOIR},
+        "schemaVersion": 2,
         "wells": {"A1": {"z": 2.5, "depth": 25.0}},
       }
     }
