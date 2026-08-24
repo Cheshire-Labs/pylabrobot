@@ -165,6 +165,15 @@ class OpentronsFlex(OpentronsRobot):
     yield
     self._current_labware_id = labware_id
 
+  def forget_pipetting_position(self) -> None:
+    """Stop believing the gantry is still over its last labware.
+
+    For when something OTHER than a move by this object put it somewhere else:
+    an operator recovering the robot by hand, an e-stop. The arc guard has to
+    read that as unknown, or the next pipetting move skips its traversal arc.
+    """
+    self._current_labware_id = None
+
   def attach_deck(self, deck: FlexDeck) -> None:
     """Swap in a new deck, so a caller can describe the deck without rebuilding
     the robot (and losing the link and the run with it).
@@ -591,7 +600,10 @@ class OpentronsFlex(OpentronsRobot):
 
     definition = self._build_labware_definition(resource, grip_distance_from_top, allow_stub)
     assert self.run_id is not None, "No active run. Call setup() first."
-    data = await self._post(f"/runs/{self.run_id}/labware_definitions", {"data": definition})
+    try:
+      data = await self._post(f"/runs/{self.run_id}/labware_definitions", {"data": definition})
+    except Exception as wire_error:
+      await self._reraise_run_aware(wire_error)
     uri = cast(str, data["data"]["definitionUri"])
     namespace, load_name, version = uri.split("/")
     self._defined_labware[name] = (namespace, load_name, int(version))
