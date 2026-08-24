@@ -1,5 +1,7 @@
 import asyncio
+import http.server
 import json
+import threading
 import time
 import unittest
 import unittest.mock
@@ -8,6 +10,7 @@ from typing import Optional
 
 import pytest
 import websockets
+import websockets.asyncio.server
 
 from pylabrobot.__version__ import STANDARD_FORM_JSON_VERSION
 from pylabrobot.resources import (
@@ -17,6 +20,8 @@ from pylabrobot.resources import (
 )
 from pylabrobot.visualizer import Visualizer
 from pylabrobot.visualizer.visualizer import (
+  _PORT_ATTEMPTS,
+  _await_server_start,
   _build_method_registry,
   _sanitize_floats,
   _serialize_resource_tree,
@@ -100,17 +105,26 @@ class VisualizerSetupStopTests(unittest.IsolatedAsyncioTestCase):
     r = Resource(size_x=100, size_y=100, size_z=100, name="root")
     vis = Visualizer(r, open_browser=False)
 
+    served_on = []
+
     async def setup_stop_single():
       await vis.setup()
       self.assertIsNotNone(vis.loop)
       # wait for the server to start
       time.sleep(1)
+      served_on.append(vis.ws_port)
       await vis.stop()
       self.assertFalse(vis.has_connection())
 
     # setup and stop twice to ensure that everything is recycled correctly
     await setup_stop_single()
     await setup_stop_single()
+
+    self.assertEqual(
+      served_on[0],
+      served_on[1],
+      "stop() must free the port; a server left running pushes the next setup along one",
+    )
 
 
 class VisualizerServerTests(unittest.IsolatedAsyncioTestCase):
@@ -127,9 +141,11 @@ class VisualizerServerTests(unittest.IsolatedAsyncioTestCase):
     self.client = await websockets.connect(self.uri)
 
   async def asyncTearDown(self):
-    await super().asyncTearDown()
-    await self.vis.stop()
+    """Close the client first: stopping the visualizer closes its websocket
+    server, which waits for connections to drain before the port comes back."""
     await self.client.close()
+    await self.vis.stop()
+    await super().asyncTearDown()
 
   def test_get_index_html(self):
     """Test that the index.html file is returned."""
@@ -200,6 +216,122 @@ class VisualizerShowMachineToolsTests(unittest.IsolatedAsyncioTestCase):
     await vis.stop()
 
 
+class VisualizerStartupFailureTests(unittest.IsolatedAsyncioTestCase):
+  """`setup()` used to stop dead here rather than fail.
+
+  Each server starts on its own thread and hands back a held lock, and both the
+  port search and the wait for that lock ran without end. A machine with no free
+  port turned setup() into a wait with nothing to read and no way out. Both
+  servers are bounded at both ends now.
+  """
+
+  def _visualizer(self) -> Visualizer:
+    return Visualizer(Resource(size_x=100, size_y=100, size_z=100, name="root"), open_browser=False)
+
+  @pytest.mark.timeout(60)
+  async def test_websocket_setup_gives_up_after_a_bounded_port_search(self):
+    """What ends a doomed search is the attempt count, not the clock, so the
+    deadline is put out of reach here rather than raced."""
+    vis = self._visualizer()
+    with (
+      unittest.mock.patch("pylabrobot.visualizer.visualizer._SERVER_START_SECONDS", 300.0),
+      unittest.mock.patch.object(
+        websockets.asyncio.server, "serve", side_effect=OSError("address already in use")
+      ) as serve,
+    ):
+      with self.assertRaises(RuntimeError) as caught:
+        await vis.setup()
+
+    self.assertEqual(serve.call_count, _PORT_ATTEMPTS)
+    self.assertIn(str(vis.ws_port), str(caught.exception))
+
+  @pytest.mark.timeout(20)
+  async def test_the_wait_gives_up_on_a_thread_that_never_serves(self):
+    """The other way this hung: a thread still alive but never binding, so the
+    lock it was handed is never released. Both servers wait through here."""
+    lock = threading.Lock()
+    lock.acquire()
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait, daemon=True)
+    thread.start()
+
+    try:
+      with unittest.mock.patch("pylabrobot.visualizer.visualizer._SERVER_START_SECONDS", 0.5):
+        with self.assertRaises(RuntimeError) as caught:
+          await _await_server_start(lock, thread, "websocket server", lambda: 2121)
+    finally:
+      release.set()
+      thread.join(timeout=5)
+
+    self.assertIn("did not start", str(caught.exception))
+    self.assertIn("2121", str(caught.exception))
+
+  @pytest.mark.timeout(60)
+  async def test_file_server_gives_up_after_a_bounded_port_search(self):
+    """The file server had the same unbounded pair, one call further into
+    setup(), so fixing only the websocket server left the hang reachable."""
+    vis = self._visualizer()
+    with (
+      unittest.mock.patch("pylabrobot.visualizer.visualizer._SERVER_START_SECONDS", 300.0),
+      unittest.mock.patch.object(Visualizer, "_run_ws_server", unittest.mock.AsyncMock()),
+      unittest.mock.patch.object(
+        http.server, "HTTPServer", side_effect=OSError("address already in use")
+      ) as httpd,
+    ):
+      with self.assertRaises(RuntimeError) as caught:
+        await vis.setup()
+
+    self.assertEqual(httpd.call_count, _PORT_ATTEMPTS)
+    last_port_tried = httpd.call_args_list[-1].args[0][1]
+    self.assertEqual(vis.fs_port, last_port_tried)
+    self.assertIn(str(last_port_tried), str(caught.exception))
+
+  @pytest.mark.timeout(20)
+  async def test_a_search_still_moving_is_given_more_time(self):
+    """Ports a previous run released sit in TIME_WAIT, so a loaded machine can
+    spend a long time walking past them. Only a search that has stopped moving
+    is out of time."""
+    lock = threading.Lock()
+    lock.acquire()
+    port = 2121
+
+    def walk_past_taken_ports():
+      nonlocal port
+      for _ in range(10):
+        time.sleep(0.05)
+        port += 1
+      lock.release()
+
+    thread = threading.Thread(target=walk_past_taken_ports, daemon=True)
+    thread.start()
+    try:
+      with unittest.mock.patch("pylabrobot.visualizer.visualizer._SERVER_START_SECONDS", 0.2):
+        await _await_server_start(lock, thread, "file server", lambda: port)
+    finally:
+      thread.join(timeout=5)
+
+    self.assertEqual(port, 2131)
+
+  @pytest.mark.timeout(60)
+  async def test_a_setup_that_failed_on_the_file_server_can_still_be_stopped(self):
+    """The websocket server is already serving by then. Stopping used to read the
+    file server first and raise, leaving the websocket one bound for good."""
+    vis = self._visualizer()
+    with (
+      unittest.mock.patch("pylabrobot.visualizer.visualizer._SERVER_START_SECONDS", 300.0),
+      unittest.mock.patch.object(
+        http.server, "HTTPServer", side_effect=OSError("address already in use")
+      ),
+    ):
+      with self.assertRaises(RuntimeError):
+        await vis.setup()
+
+    websocket_thread = vis.t
+    await vis.stop()
+    websocket_thread.join(timeout=10)
+    self.assertFalse(websocket_thread.is_alive())
+
+
 class VisualizerCommandTests(unittest.IsolatedAsyncioTestCase):
   """Tests for command sending using the visualizer backend."""
 
@@ -214,6 +346,13 @@ class VisualizerCommandTests(unittest.IsolatedAsyncioTestCase):
     self.vis.send_command = self.send_command_mock  # type: ignore[method-assign]
 
     await self.vis.setup()
+
+  async def asyncTearDown(self):
+    """Every test here starts a websocket and a file server. Left running they
+    hold their ports for the rest of the session, and the next setup walks past
+    them one port at a time."""
+    await self.vis.stop()
+    await super().asyncTearDown()
 
   async def _wait_for_event(self, event: str, data_key: Optional[str] = None, timeout: float = 5.0):
     """Wait until the most recent send_command call is ``event`` (optionally carrying

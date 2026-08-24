@@ -10,7 +10,7 @@ import re
 import threading
 import time
 import webbrowser
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
   import websockets
@@ -24,6 +24,53 @@ except ImportError as e:
 
 from pylabrobot.__version__ import STANDARD_FORM_JSON_VERSION
 from pylabrobot.resources import Resource
+
+_PORT_ATTEMPTS = 100
+"""How many consecutive ports either server tries before giving up."""
+
+_SERVER_START_SECONDS = 30.0
+"""How long `setup()` waits for a server before saying it did not start."""
+
+_SERVER_STOP_SECONDS = 5.0
+"""How long `stop()` waits for a server thread to finish. Only so the port is
+usually free for the next `setup()`; a slower one just gets searched past."""
+
+
+async def _await_server_start(
+  lock: threading.Lock, thread: threading.Thread, what: str, port: Callable[[], int]
+) -> None:
+  """Wait for the thread that starts `what` to release the lock it was handed.
+
+  Both servers start on their own thread and hand back a held lock, so waiting
+  on it is the only way to learn the port they settled on. Waiting forever is
+  not: a thread that died, or one that ran out of ports, leaves nothing to
+  release the lock and shows up as a process that stops with nothing to read.
+
+  The clock only judges a search that has stopped moving. Ports a test run just
+  released sit in TIME_WAIT for a while, so a machine under load can legitimately
+  spend a long time walking past them, and failing that off a flat deadline would
+  turn slowness into an error. Moving on to the next port restarts the clock; the
+  attempt count is what ends a search that will never succeed.
+  """
+  deadline = time.monotonic() + _SERVER_START_SECONDS
+  last_port = port()
+  while not lock.acquire(blocking=False):
+    if not thread.is_alive():
+      raise RuntimeError(
+        f"The visualizer's {what} stopped before it started serving. "
+        f"The last port it tried was {port()}."
+      )
+    if port() != last_port:
+      last_port = port()
+      deadline = time.monotonic() + _SERVER_START_SECONDS
+    elif time.monotonic() > deadline:
+      raise RuntimeError(
+        f"The visualizer's {what} did not start within {_SERVER_START_SECONDS:.0f}s "
+        f"on port {last_port}."
+      )
+    await asyncio.sleep(0.01)
+  lock.release()
+
 
 logger = logging.getLogger(__name__)
 
@@ -126,10 +173,10 @@ class Visualizer:
 
     Args:
       host: The hostname of the file and websocket server.
-      ws_port: The port of the websocket server. If this port is in use, the port will be
-        incremented until a free port is found.
-      fs_port: The port of the file server. If this port is in use, the port will be incremented
-        until a free port is found.
+      ws_port: The port of the websocket server. If this port is in use, the next ports are
+        tried, up to 100 of them.
+      fs_port: The port of the file server. If this port is in use, the next ports are tried,
+        up to 100 of them.
       open_browser: If `True`, the visualizer will open a browser window when it is started.
       name: A custom name to display in the browser header. If ``None``, the filename of the
         calling script or notebook is detected automatically.
@@ -485,7 +532,7 @@ class Visualizer:
       raise RuntimeError("The visualizer has already been started.")
 
     await self._run_ws_server()
-    self._run_file_server()
+    await self._run_file_server()
     self.setup_finished = True
 
   async def _run_ws_server(self):
@@ -496,6 +543,7 @@ class Visualizer:
 
     async def run_server():
       self._stop_ = self.loop.create_future()
+      taken = 0
       while True:
         try:
           async with websockets.asyncio.server.serve(self._socket_handler, self.host, self.ws_port):
@@ -506,7 +554,12 @@ class Visualizer:
         except asyncio.CancelledError:
           pass
         except OSError:
-          # If the port is in use, try the next port.
+          # If the port is in use, try the next port -- but not forever. Only a
+          # started server releases the lock the caller is waiting on, so an
+          # endless search shows up as a process that stops with nothing to read.
+          taken += 1
+          if taken >= _PORT_ATTEMPTS:
+            break
           self.ws_port += 1
 
     def start_loop():
@@ -519,10 +572,9 @@ class Visualizer:
     self._t = threading.Thread(target=start_loop, daemon=True)
     self.t.start()
 
-    while lock.locked():
-      time.sleep(0.001)
+    await _await_server_start(lock, self.t, "websocket server", lambda: self.ws_port)
 
-  def _run_file_server(self):
+  async def _run_file_server(self):
     """Start a simple webserver to serve static files."""
 
     dirname = os.path.dirname(__file__)
@@ -579,21 +631,24 @@ class Visualizer:
           else:
             return super().do_GET()
 
-      while True:
+      for attempt in range(_PORT_ATTEMPTS):
         try:
           self._httpd = http.server.HTTPServer(
             (self.host, self.fs_port),
             QuietSimpleHTTPRequestHandler,
           )
-          print(
-            f"File server started at http://{self.host}:{self.fs_port} . "
-            "Open this URL in your browser."
-          )
-          lock.release()
           break
         except OSError:
+          # Advance only when there is another attempt left, so the port this
+          # ends on is the last one actually tried and not one past it.
+          if attempt == _PORT_ATTEMPTS - 1:
+            return
           self.fs_port += 1
 
+      print(
+        f"File server started at http://{self.host}:{self.fs_port} . Open this URL in your browser."
+      )
+      lock.release()
       self.httpd.serve_forever()
 
     lock = threading.Lock()
@@ -606,9 +661,8 @@ class Visualizer:
     )
     self.fst.start()
 
-    # Wait for the server to start before opening the browser so that we can get the correct port.
-    while lock.locked():
-      time.sleep(0.001)
+    # The port is only known once the server binds one, and the browser needs it.
+    await _await_server_start(lock, self.fst, "file server", lambda: self.fs_port)
 
     if self.open_browser:
       webbrowser.open(f"http://{self.host}:{self.fs_port}")
@@ -621,9 +675,12 @@ class Visualizer:
     """
 
     # -- file server --
-    # Stop the file server.
-    self.httpd.shutdown()
-    self.httpd.server_close()
+    # setup() starts the websocket server first, so a run that failed on the file
+    # server still has one to shut down. Reading self.httpd here would raise and
+    # strand it for the rest of the process.
+    if self._httpd is not None:
+      self._httpd.shutdown()
+      self._httpd.server_close()
 
     # Clear all relevant attributes.
     self._httpd = None
@@ -631,11 +688,22 @@ class Visualizer:
 
     # -- websocket --
     if self.has_connection():
-      # send stop event to the browser
-      await self.send_command("stop", wait_for_response=False)
+      # Telling the browser is a courtesy; a tab that closed first must not stop
+      # the visualizer from shutting its own servers down.
+      try:
+        await self.send_command("stop", wait_for_response=False)
+      except websockets.exceptions.WebSocketException:
+        logger.debug("Browser was already gone when the visualizer stopped.")
 
-      # must be thread safe, because event loop is running in a separate thread
-      self.loop.call_soon_threadsafe(self.stop_.set_result, "done")
+    # The server waits on this future whether or not a browser ever connected, so
+    # resolving it only when one did left the server bound to its port for the
+    # rest of the process, with nothing left holding a handle to shut it down.
+    thread = self._t
+    if self._loop is not None and self._stop_ is not None and not self._stop_.done():
+      # must be thread safe, because the event loop runs in a separate thread
+      self._loop.call_soon_threadsafe(self._stop_.set_result, "done")
+    if thread is not None:
+      thread.join(timeout=_SERVER_STOP_SECONDS)
 
     # Clear all relevant attributes.
     self.received.clear()
