@@ -20,11 +20,20 @@ def _byte_iter(s: str) -> Iterator[bytes]:
     yield c.encode()
 
 
+_MOCK_IO_TIMEOUT = 5.0
+"""What _read_until waits for a mocked read to answer.
+
+It only has to be long enough that a loaded machine is not mistaken for a reader
+that stopped answering: the reads here return at once, and no test asks for the
+timeout to fire.
+"""
+
+
 class TestCytation5Backend(unittest.IsolatedAsyncioTestCase):
   """Tests for the Cytation5Backend."""
 
   async def asyncSetUp(self):
-    self.backend = BioTekPlateReaderDriver(timeout=0.1)
+    self.backend = BioTekPlateReaderDriver(timeout=_MOCK_IO_TIMEOUT)
     self.backend.io = unittest.mock.MagicMock()
     self.backend.io.setup = unittest.mock.AsyncMock()
     self.backend.io.stop = unittest.mock.AsyncMock()
@@ -407,7 +416,7 @@ class TestBioTekLoadingTray(unittest.IsolatedAsyncioTestCase):
 
   async def asyncSetUp(self):
     self.manager = unittest.mock.Mock()
-    self.backend = BioTekPlateReaderDriver(timeout=0.1)
+    self.backend = BioTekPlateReaderDriver(timeout=_MOCK_IO_TIMEOUT)
     self.backend.set_slow_mode = unittest.mock.AsyncMock()  # type: ignore[method-assign]
     self.backend.set_plate = unittest.mock.AsyncMock()  # type: ignore[method-assign]
     self.backend.send_command = unittest.mock.AsyncMock()  # type: ignore[method-assign]
