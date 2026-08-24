@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsFlex.retract\_axis
+================================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsFlex.retract_axis

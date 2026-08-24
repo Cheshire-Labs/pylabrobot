@@ -1,0 +1,37 @@
+﻿:orphan:
+
+
+pylabrobot.opentrons.PipetteInfo
+================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. autoclass:: PipetteInfo
+
+   
+   
+   .. rubric:: Attributes
+
+   .. autosummary::
+      :toctree: .
+   
+      ~PipetteInfo.mount
+      ~PipetteInfo.pipette_name
+      ~PipetteInfo.pipette_model
+      ~PipetteInfo.pipette_id
+      ~PipetteInfo.channels
+      ~PipetteInfo.min_volume
+      ~PipetteInfo.max_volume
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      ~PipetteInfo.__init__
+   
+   

@@ -1,0 +1,34 @@
+﻿:orphan:
+
+
+pylabrobot.opentrons.OpentronsRobot
+===================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. autoclass:: OpentronsRobot
+
+   
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      ~OpentronsRobot.__init__
+      ~OpentronsRobot.cancel_run
+      ~OpentronsRobot.connect
+      ~OpentronsRobot.create_run
+      ~OpentronsRobot.disconnect
+      ~OpentronsRobot.home
+      ~OpentronsRobot.initialize
+      ~OpentronsRobot.run_is_live
+      ~OpentronsRobot.send_command
+      ~OpentronsRobot.setup
+      ~OpentronsRobot.stop
+   
+   

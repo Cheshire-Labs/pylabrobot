@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsFlex.well\_bottom\_deck\_z
+========================================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsFlex.well_bottom_deck_z

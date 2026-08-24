@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsFlex.add\_comment
+===============================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsFlex.add_comment

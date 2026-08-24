@@ -33,6 +33,7 @@
     <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=8f2a1f02" />
     <link rel="stylesheet" type="text/css" href="../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/plr_devices.css?v=b0ac04d7" />
     <link rel="stylesheet" type="text/css" href="../_static/plr_cards.css?v=ed9dfa64" />
   
   <!-- So that users can add custom icons -->
@@ -46,6 +47,7 @@
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/plr_devices.js?v=2dde28f2"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'api/pylabrobot';</script>
     <script>
         DOCUMENTATION_OPTIONS.theme_version = '0.20.0';
@@ -64,7 +66,7 @@
     <link rel="prev" title="Contributing a New Recipe" href="../contributor_guide/adding-coookbook-recipes.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.2.1" />
+  <meta name="docsearch:version" content="0.2.2" />
   
     
     <script src="../_static/searchtools.js"></script>
@@ -579,22 +581,34 @@
 <div class="toctree-wrapper compound">
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="pylabrobot.config.html">pylabrobot.config package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.centrifuge.html">pylabrobot.centrifuge package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="_autosummary/pylabrobot.machines.machine.Machine.html">pylabrobot.machines.machine.Machine</a></li>
-<li class="toctree-l1"><a class="reference internal" href="_autosummary/pylabrobot.machines.backend.MachineBackend.html">pylabrobot.machines.backend.MachineBackend</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.heating_shaking.html">pylabrobot.heating_shaking package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.liquid_handling.html">pylabrobot.liquid_handling package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.plate_reading.html">pylabrobot.plate_reading package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.pumps.html">pylabrobot.pumps package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.only_fans.html">pylabrobot.only_fans package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.generic.html">Generic devices</a></li>
 <li class="toctree-l1"><a class="reference internal" href="pylabrobot.resources.html">pylabrobot.resources package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.scales.html">pylabrobot.scales package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.io.sila.html">pylabrobot.io.sila package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.shaking.html">pylabrobot.shaking package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.temperature_controlling.html">pylabrobot.temperature_controlling package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.thermocycling.html">pylabrobot.thermocycling package</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pylabrobot.tilting.html">pylabrobot.tilting package</a></li>
 <li class="toctree-l1"><a class="reference internal" href="pylabrobot.utils.html">pylabrobot.utils package</a></li>
+</ul>
+</div>
+</section>
+<section id="manufacturers">
+<h2>Manufacturers<a class="headerlink" href="#manufacturers" title="Link to this heading">#</a></h2>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.agilent.html">pylabrobot.agilent package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.azenta.html">pylabrobot.azenta package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.big_bear.html">pylabrobot.big_bear package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.brooks.html">pylabrobot.brooks package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.byonoy.html">pylabrobot.byonoy package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.cole_parmer.html">pylabrobot.cole_parmer package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.curiox.html">pylabrobot.curiox package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.hamilton.html">pylabrobot.hamilton package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.high_res.html">pylabrobot.high_res package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.inheco.html">pylabrobot.inheco package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.kbioscience.html">pylabrobot.kbioscience package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.kbiosystems.html">pylabrobot.kbiosystems package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.mettler_toledo.html">pylabrobot.mettler_toledo package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.molecular_devices.html">pylabrobot.molecular_devices package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.opentrons.html">pylabrobot.opentrons package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.qinstruments.html">pylabrobot.qinstruments package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.sartorius.html">pylabrobot.sartorius package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pylabrobot.thermo_fisher.html">pylabrobot.thermo_fisher package</a></li>
 </ul>
 </div>
 </section>
@@ -648,6 +662,7 @@
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#subpackages">Subpackages</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#manufacturers">Manufacturers</a></li>
 </ul>
   </nav></div>
 

@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsFlex.sync\_tips\_to\_robot
+========================================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsFlex.sync_tips_to_robot

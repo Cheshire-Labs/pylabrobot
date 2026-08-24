@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsRobot.disconnect
+==============================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsRobot.disconnect

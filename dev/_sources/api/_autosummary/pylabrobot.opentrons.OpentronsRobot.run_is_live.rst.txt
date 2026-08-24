@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsRobot.run\_is\_live
+=================================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsRobot.run_is_live

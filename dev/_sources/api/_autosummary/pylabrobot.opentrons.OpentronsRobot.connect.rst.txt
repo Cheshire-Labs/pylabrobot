@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsRobot.connect
+===========================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsRobot.connect

@@ -1,0 +1,6 @@
+pylabrobot.opentrons.PipetteInfo.min\_volume
+============================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. autoattribute:: PipetteInfo.min_volume

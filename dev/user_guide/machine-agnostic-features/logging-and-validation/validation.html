@@ -33,6 +33,7 @@
     <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=8f2a1f02" />
     <link rel="stylesheet" type="text/css" href="../../../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
     <link rel="stylesheet" type="text/css" href="../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/plr_devices.css?v=b0ac04d7" />
     <link rel="stylesheet" type="text/css" href="../../../_static/plr_cards.css?v=ed9dfa64" />
   
   <!-- So that users can add custom icons -->
@@ -46,6 +47,7 @@
     <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="../../../_static/copybutton.js?v=f281be69"></script>
+    <script src="../../../_static/plr_devices.js?v=2dde28f2"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'user_guide/machine-agnostic-features/logging-and-validation/validation';</script>
     <script>
         DOCUMENTATION_OPTIONS.theme_version = '0.20.0';
@@ -64,7 +66,7 @@
     <link rel="prev" title="Setting Up Logging" href="logging.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.2.1" />
+  <meta name="docsearch:version" content="0.2.2" />
   
     
     <script src="../../../_static/searchtools.js"></script>
@@ -516,131 +518,133 @@
   <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
   <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">Getting started</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../../_getting-started/installation.html">Installation</a></li>
-<li class="toctree-l1 has-children"><a class="reference internal" href="../../_getting-started/plr-architecture.html">How PLR Works</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l2"><a class="reference internal" href="../../_getting-started/units.html">Default Units</a></li>
-</ul>
-</details></li>
-<li class="toctree-l1"><a class="reference internal" href="../../_getting-started/rpi.html">Setting up PLR on a Raspberry Pi</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting-started/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting-started/rpi.html">Setting up PLR on a Raspberry Pi</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting-started/units.html">Default Units</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Machines</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../machines.html">Supported Machines</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../definitions.html">Definitions</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../generic/index.html">Generic devices</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../generic/line-barcode-scanner/hello-world.html">Line-oriented serial barcode scanners</a></li>
+</ul>
+</details></li>
 <li class="toctree-l1 has-children"><a class="reference internal" href="../../00_liquid-handling/_liquid-handling.html">Liquid Handling</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/_hamilton-star.html">Hamilton STAR</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/basic.html">Getting started with liquid handling on a Hamilton STAR(let)</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/96head.html">Using the 96 head</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/autoload_and_1d_barcode_reader.html">Using the autoload &amp; 1D barcode reader</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/iswap-module.html">iSWAP Module</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/star_lld.html">Liquid level detection on Hamilton STAR(let)</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/y-probing.html">Y-probing</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/z-probing.html">Z-probing</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/foil.html">Foil</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/debug.html">Debugging STAR issues</a></li>
-<li class="toctree-l3 has-children"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/hardware/index.html">Hamilton STAR Hardware Guide</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/hardware/replacing-iswap.html">Replacing iSWAP arm on Hamilton STAR</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/hardware/adjusting-iswap.html">Auto-Adjustment of iSWAP</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/hardware/adjusting-robot.html">Complete Adjustment Procedure for STAR(let)</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/hardware/adjusting-iswap-gripper-parrallelity.html">Adjust iSWAP gripper parallelity</a></li>
-</ul>
-</details></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/hamilton-liquid-classes.html">Using “Hamilton Liquid Classes” with Pylabrobot</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/core-grippers.html">Co-Re Grippers</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/hamilton-star/surface-following.html">Surface following</a></li>
-</ul>
-</details></li>
-<li class="toctree-l2"><a class="reference internal" href="../../00_liquid-handling/hamilton-vantage/_hamilton-vantage.html">Hamilton Vantage</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../../00_liquid-handling/hamilton-prep/_hamilton-prep.html">Hamilton Prep</a></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../00_liquid-handling/opentrons/ot2/ot2.html">Opentrons OT-2</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/opentrons/ot2/hello-world.html">OT-2 Hello World</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/opentrons/ot2/ot2-simulator.html">OT-2 Simulator with Visualizer</a></li>
-</ul>
-</details></li>
-<li class="toctree-l2"><a class="reference internal" href="../../00_liquid-handling/tecan-evo/_tecan-evo.html">Tecan EVO</a></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../00_liquid-handling/plate-washing/plate-washing.html">Plate Washing</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/plate-washing/biotek-el406.html">BioTek EL406</a></li>
-</ul>
-</details></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../00_liquid-handling/pumps/_pumps.html">Pumps</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../00_liquid-handling/pumps/cole-parmer-masterflex.html">Cole Parmer Masterflex</a></li>
-</ul>
-</details></li>
 <li class="toctree-l2"><a class="reference internal" href="../../00_liquid-handling/moving-channels-around.html">Manually moving channels around</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../00_liquid-handling/tutorial_tip_inventory_consolidation.html">Tip Inventory Consolidation</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../00_liquid-handling/mixing.html">Mixing</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../00_liquid-handling/container_no_go_zones.html">Container No-Go Zones</a></li>
 </ul>
 </details></li>
-<li class="toctree-l1 has-children"><a class="reference internal" href="../../01_material-handling/_material-handling.html">Material Handling</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../01_material-handling/arms/_arm.html">Arm</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3 has-children"><a class="reference internal" href="../../01_material-handling/arms/c_scara/_scara.html">SCARA</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../01_material-handling/arms/c_scara/precise-flex-pf400/hello-world.html">PreciseFlex PF400 and PF3400 robots</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Manufacturers</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../agilent/index.html">Agilent</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../agilent/benchcel/hello-world.html">Agilent BenchCel 4R quickstart</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../agilent/vspin/index.html">VSpin</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../agilent/vspin/hello-world.html">Agilent VSpin centrifuge quickstart</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../agilent/vspin/events.html">VSpin and Access2 events</a></li>
 </ul>
 </details></li>
 </ul>
 </details></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../01_material-handling/centrifuge/_centrifuge.html">Centrifuges</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/centrifuge/agilent_vspin.html">Agilent VSpin</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/centrifuge/highres_microspin.html">HighRes Biosolutions MicroSpin</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../azenta/index.html">Azenta</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../azenta/fluidx/intellixcap96/hello-world.html">FluidX IntelliXcap 96</a></li>
 </ul>
 </details></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../01_material-handling/heating_shaking/heating_shaking.html">Heater Shakers</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/heating_shaking/inheco.html">Inheco ThermoShake</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/heating_shaking/hamilton.html">Hamilton Heater Shaker</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/heating_shaking/qinstruments.html">QInstruments BioShake</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../big_bear/index.html">BigBear</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../big_bear/orbital-shaker/hello-world.html">BigBear Orbital Shaker</a></li>
 </ul>
 </details></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../01_material-handling/fans/fans.html">Fans (Air Filtration Systems)</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/fans/hamilton_hepa_scap.html">Hamilton HEPA Fan</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../brooks/index.html">Brooks</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../brooks/precise_flex/hello-world.html">Brooks PreciseFlex PF400 / PF3400</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../brooks/precise_flex/events.html">PreciseFlex events</a></li>
 </ul>
 </details></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../01_material-handling/sealers/sealers.html">Sealers</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/sealers/a4s.html">Azenta a4S</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../byonoy/index.html">Byonoy</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../byonoy/absorbance_96/hello-world.html">Byonoy Absorbance 96</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../byonoy/luminescence_96/hello-world.html">Byonoy Luminescence 96 — lab guide</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../byonoy/luminescence_96/led_bar.html">Byonoy L96 — LED bar</a></li>
 </ul>
 </details></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../01_material-handling/temperature-controllers/temperature-controllers.html">Temperature Controllers</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/temperature-controllers/ot-temperature-controller.html">Opentrons Temperature Module</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/temperature-controllers/hamilton-heater-cooler.html">Hamilton Heater Cooler (HHC)</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/temperature-controllers/inheco.html">Hello World, Inheco CPAC!</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../cole_parmer/index.html">Cole-Parmer</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../cole_parmer/genogrinder/hello-world.html">Cole-Parmer GenoGrinder (fka SPEX GenoGrinder)</a></li>
 </ul>
 </details></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../01_material-handling/storage/storage.html">Storage</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/storage/cytomat.html">TFS Cytomat Series</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/storage/inheco/incubator_shaker.html">Inheco Incubator (Shaker)</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/storage/inheco/scila.html">Inheco SCILA</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/storage/liconic.html">Liconic STX Series</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../curiox/index.html">Curiox</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../curiox/curiox-ht2000/hello-world.html">Curiox Laminar Wash HT2000</a></li>
 </ul>
 </details></li>
-<li class="toctree-l2"><a class="reference internal" href="../../01_material-handling/tilting.html">Tilting</a></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../01_material-handling/thermocycling/thermocycling.html">Thermocycling</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../01_material-handling/thermocycling/inheco-odtc.html">Inheco ODTC</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../hamilton/index.html">Hamilton</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../hamilton/star/index.html">Hamilton STAR</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../hamilton/star/debug.html">Debugging STAR issues</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../../hamilton/star/hardware/index.html">Hamilton STAR Hardware Guide</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../hamilton/star/hardware/replacing-iswap.html">Replacing iSWAP arm on Hamilton STAR</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../hamilton/star/hardware/adjusting-iswap.html">Auto-Adjustment of iSWAP</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../hamilton/star/hardware/adjusting-robot.html">Complete Adjustment Procedure for STAR(let)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../hamilton/star/hardware/adjusting-iswap-gripper-parrallelity.html">Adjust iSWAP gripper parallelity</a></li>
 </ul>
 </details></li>
 </ul>
 </details></li>
-<li class="toctree-l1 has-children"><a class="reference internal" href="../../02_analytical/_analytical.html">Analytical</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../02_analytical/flow-cytometers/_flow-cytometers.html">Flow Cytometers</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/flow-cytometers/beckman-coulter-cytoflex.html">Beckman CytoFLEX</a></li>
 </ul>
 </details></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../02_analytical/plate-reading/plate-reading.html">Plate reading</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/plate-reading/bmg-clariostar.html">BMG Labtech CLARIOstar (Plus)</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/plate-reading/byonoy/absorbance.html">Byonoy Absorbance 96 Automate</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/plate-reading/byonoy/luminescence.html">Byonoy Luminescence 96 Automate</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/plate-reading/byonoy.html">Byonoy Absorbance 96 Automate</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/plate-reading/cytation.html">Cytation</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/plate-reading/pico.html">ImageXpress Pico</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/plate-reading/spectramax-gemini-em.html">SpectraMax Gemini EM</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/plate-reading/synergyh1.html">Synergy H1</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/plate-reading/tecan-spark.html">Tecan Spark 20M</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/plate-reading/tecan-infinite.html">Tecan Infinite 200 PRO</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../high_res/index.html">HighRes</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../high_res/lid-valet/hello-world.html">HighRes LidValet</a></li>
 </ul>
 </details></li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="../../02_analytical/scales/scales.html">Scales</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../02_analytical/scales/mettler-toledo-WXS205SDU.html">Mettler Toledo Precision Scales</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../inheco/index.html">Inheco</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../inheco/cpac/hello-world.html">Inheco CPAC</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../inheco/incubator_shaker/hello-world.html">Inheco Incubator Shaker</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../inheco/odtc/hello-world.html">Inheco ODTC</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../inheco/scila/hello-world.html">Inheco SCILA</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../inheco/thermoshake/hello-world.html">Inheco ThermoShake</a></li>
 </ul>
 </details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../kbioscience/index.html">KBioscience</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../kbioscience/kube/hello-world.html">KBioscience KUBE</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../kbiosystems/index.html">KBiosystems</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../kbiosystems/ultraseal-epro/hello-world.html">KBiosystems Ultraseal ePRO</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../kbiosystems/ultraseal-pro/hello-world.html">KBiosystems Ultraseal PRO (formerly WASP)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../kbiosystems/ultraseal-xt-pro/hello-world.html">KBiosystems Ultraseal XT Pro</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../mettler_toledo/index.html">Mettler Toledo</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../mettler_toledo/wxs205sdu/hello-world.html">Mettler Toledo WXS205SDU</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../molecular_devices/index.html">Molecular Devices</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../molecular_devices/spectramax/hello-world.html">Molecular Devices SpectraMax</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../molecular_devices/imageXpress/pico.html">ImageXpress Pico</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../opentrons/index.html">Opentrons</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../opentrons/flex/hello-world.html">Opentrons Flex — hello world (real hardware)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../opentrons/flex/use_channels_smoke.html">Flex <code class="docutils literal notranslate"><span class="pre">use_channels</span></code> redesign — hardware smoke test</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../qinstruments/index.html">QInstruments</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../qinstruments/bioshake/hello-world.html">QInstruments BioShake</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../sartorius/index.html">Sartorius</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../sartorius/entris2/hello-world.html">Sartorius Entris II</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../thermo_fisher/index.html">Thermo Fisher</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../thermo_fisher/alps/index.html">ALPS Heat Sealers</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../thermo_fisher/alps/alps300/hello-world.html">Thermo Scientific ALPS 300</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../thermo_fisher/alps/alps3000/hello-world.html">Thermo Scientific ALPS 3000</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../thermo_fisher/alps/alps5000/hello-world.html">Thermo Scientific ALPS 5000</a></li>
+</ul>
+</details></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../ufactory/index.html">UFACTORY</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../ufactory/xarm6/hello-world.html">UFACTORY xArm 6</a></li>
 </ul>
 </details></li>
 </ul>
@@ -648,6 +652,14 @@
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../using-the-visualizer.html">Using the Visualizer</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../using-trackers.html">Using Trackers</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../event-bus.html">EventBus</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../event-bus/machine-lifecycle.html">Machine lifecycle events</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../event-bus/incubator.html">Incubator events</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../event-bus/liquid-handler.html">LiquidHandler events</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../event-bus/thermal-and-shaking.html">Shaker and temperature-controller events</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../event-bus/diagnostic-transports.html">Diagnostic transport events</a></li>
+</ul>
+</details></li>
 <li class="toctree-l1"><a class="reference internal" href="../writing-robot-agnostic-protocols.html">Writing Machine-Agnostic Protocols</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../tip-spot-generators.html">Use of Iterators &amp; Generators</a></li>
 <li class="toctree-l1 current active has-children"><a class="reference internal" href="logging-and-validation.html">Logging &amp; Validation</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
@@ -750,8 +762,8 @@
 <div class="cell docutils container">
 <div class="cell_input docutils container">
 <div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pylabrobot.resources</span><span class="w"> </span><span class="kn">import</span> <span class="n">TIP_CAR_480_A00</span><span class="p">,</span> <span class="n">hamilton_96_tiprack_1000ul</span>
-<span class="n">tip_car</span> <span class="o">=</span> <span class="n">TIP_CAR_480_A00</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;tip_car&quot;</span><span class="p">)</span>
-<span class="n">tip_car</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">tr</span> <span class="o">=</span> <span class="n">hamilton_96_tiprack_1000ul</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;ht&quot;</span><span class="p">)</span>
+<span class="n">tip_car</span> <span class="o">=</span> <span class="n">TIP_CAR_480_A00</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">"tip_car"</span><span class="p">)</span>
+<span class="n">tip_car</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">tr</span> <span class="o">=</span> <span class="n">hamilton_96_tiprack_1000ul</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">"ht"</span><span class="p">)</span>
 <span class="n">lh</span><span class="o">.</span><span class="n">deck</span><span class="o">.</span><span class="n">assign_child_resource</span><span class="p">(</span><span class="n">tip_car</span><span class="p">,</span> <span class="n">rails</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
 </pre></div>
 </div>
@@ -775,9 +787,9 @@
 <p>While it might seem cumbersome, this actually ensures you have a real working protocol before doing validation. The benefit of using capture files is whenever you change your protocol and have seen it run, you can just grab the capture file and use it for validation. No need to manually write tests.</p>
 <div class="cell docutils container">
 <div class="cell_input docutils container">
-<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">validation_file</span> <span class="o">=</span> <span class="s2">&quot;./validation.json&quot;</span>
+<div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">validation_file</span> <span class="o">=</span> <span class="s2">"./validation.json"</span>
 <span class="n">pylabrobot</span><span class="o">.</span><span class="n">start_capture</span><span class="p">(</span><span class="n">validation_file</span><span class="p">)</span>
-<span class="k">await</span> <span class="n">simple_protocol</span><span class="p">(</span><span class="n">tr</span><span class="p">[</span><span class="s2">&quot;A1:H1&quot;</span><span class="p">])</span>
+<span class="k">await</span> <span class="n">simple_protocol</span><span class="p">(</span><span class="n">tr</span><span class="p">[</span><span class="s2">"A1:H1"</span><span class="p">])</span>
 <span class="n">pylabrobot</span><span class="o">.</span><span class="n">stop_capture</span><span class="p">()</span>
 </pre></div>
 </div>
@@ -797,19 +809,19 @@
 </div>
 <div class="cell_output docutils container">
 <div class="output stream highlight-myst-ansi notranslate"><div class="highlight"><pre><span></span>{
-  &quot;version&quot;: &quot;0.1.6&quot;,
-  &quot;commands&quot;: [
+  "version": "0.1.6",
+  "commands": [
     {
-      &quot;module&quot;: &quot;usb&quot;,
-      &quot;device_id&quot;: &quot;[0x8af:0x8000][][]&quot;,
-      &quot;action&quot;: &quot;write&quot;,
-      &quot;data&quot;: &quot;C0RTid0001&quot;
+      "module": "usb",
+      "device_id": "[0x8af:0x8000][][]",
+      "action": "write",
+      "data": "C0RTid0001"
     },
     {
-      &quot;module&quot;: &quot;usb&quot;,
-      &quot;device_id&quot;: &quot;[0x8af:0x8000][][]&quot;,
-      &quot;action&quot;: &quot;read&quot;,
-      &quot;data&quot;: &quot;C0RTid0001er00/00rt0 0 0 0 0 0 0 0&quot;
+      "module": "usb",
+      "device_id": "[0x8af:0x8000][][]",
+      "action": "read",
+      "data": "C0RTid0001er00/00rt0 0 0 0 0 0 0 0"
     },
 </pre></div>
 </div>
@@ -823,7 +835,7 @@
 <div class="cell docutils container">
 <div class="cell_input docutils container">
 <div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">pylabrobot</span><span class="o">.</span><span class="n">validate</span><span class="p">(</span><span class="n">validation_file</span><span class="p">)</span>
-<span class="k">await</span> <span class="n">simple_protocol</span><span class="p">(</span><span class="n">tr</span><span class="p">[</span><span class="s2">&quot;A1:H1&quot;</span><span class="p">])</span>
+<span class="k">await</span> <span class="n">simple_protocol</span><span class="p">(</span><span class="n">tr</span><span class="p">[</span><span class="s2">"A1:H1"</span><span class="p">])</span>
 <span class="n">pylabrobot</span><span class="o">.</span><span class="n">end_validation</span><span class="p">()</span>
 </pre></div>
 </div>
@@ -841,7 +853,7 @@
 <div class="cell docutils container">
 <div class="cell_input docutils container">
 <div class="highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">pylabrobot</span><span class="o">.</span><span class="n">validate</span><span class="p">(</span><span class="n">validation_file</span><span class="p">)</span>
-<span class="k">await</span> <span class="n">simple_protocol</span><span class="p">(</span><span class="n">tr</span><span class="p">[</span><span class="s2">&quot;A2:H2&quot;</span><span class="p">])</span>
+<span class="k">await</span> <span class="n">simple_protocol</span><span class="p">(</span><span class="n">tr</span><span class="p">[</span><span class="s2">"A2:H2"</span><span class="p">])</span>
 <span class="n">pylabrobot</span><span class="o">.</span><span class="n">end_validation</span><span class="p">()</span>
 </pre></div>
 </div>
@@ -856,7 +868,7 @@ actual:   C0TPid0009xp01269 01269 01269 01269 01269 01269 01269 01269yp1458 1368
 <span class="ne">ValidationError</span><span class="g g-Whitespace">                           </span>Traceback (most recent call last)
 <span class="n">Cell</span> <span class="n">In</span><span class="p">[</span><span class="mi">7</span><span class="p">],</span> <span class="n">line</span> <span class="mi">2</span>
 <span class="g g-Whitespace">      </span><span class="mi">1</span> <span class="n">pylabrobot</span><span class="o">.</span><span class="n">validate</span><span class="p">(</span><span class="n">validation_file</span><span class="p">)</span>
-<span class="ne">----&gt; </span><span class="mi">2</span> <span class="k">await</span> <span class="n">simple_protocol</span><span class="p">(</span><span class="n">tr</span><span class="p">[</span><span class="s2">&quot;A2:H2&quot;</span><span class="p">])</span>
+<span class="ne">----&gt; </span><span class="mi">2</span> <span class="k">await</span> <span class="n">simple_protocol</span><span class="p">(</span><span class="n">tr</span><span class="p">[</span><span class="s2">"A2:H2"</span><span class="p">])</span>
 <span class="g g-Whitespace">      </span><span class="mi">3</span> <span class="n">pylabrobot</span><span class="o">.</span><span class="n">end_validation</span><span class="p">()</span>
 
 <span class="nn">Cell In[3], line 3,</span> in <span class="ni">simple_protocol</span><span class="nt">(tips)</span>
@@ -868,14 +880,14 @@ actual:   C0TPid0009xp01269 01269 01269 01269 01269 01269 01269 01269yp1458 1368
 
 <span class="nn">File ~/retro/pylabrobot/pylabrobot/machines/machine.py:35,</span> in <span class="ni">need_setup_finished.&lt;locals&gt;.wrapper</span><span class="nt">(*args, **kwargs)</span>
 <span class="g g-Whitespace">     </span><span class="mi">33</span> <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">setup_finished</span><span class="p">:</span>
-<span class="g g-Whitespace">     </span><span class="mi">34</span>   <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">&quot;The setup has not finished. See `setup`.&quot;</span><span class="p">)</span>
+<span class="g g-Whitespace">     </span><span class="mi">34</span>   <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">"The setup has not finished. See `setup`."</span><span class="p">)</span>
 <span class="ne">---&gt; </span><span class="mi">35</span> <span class="k">return</span> <span class="k">await</span> <span class="n">func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
 
 <span class="nn">File ~/retro/pylabrobot/pylabrobot/liquid_handling/liquid_handler.py:467,</span> in <span class="ni">LiquidHandler.pick_up_tips</span><span class="nt">(self, tip_spots, use_channels, offsets, **backend_kwargs)</span>
 <span class="g g-Whitespace">    </span><span class="mi">464</span>   <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">head</span><span class="p">[</span><span class="n">channel</span><span class="p">]</span><span class="o">.</span><span class="n">commit</span> <span class="k">if</span> <span class="n">success</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">head</span><span class="p">[</span><span class="n">channel</span><span class="p">]</span><span class="o">.</span><span class="n">rollback</span><span class="p">)()</span>
 <span class="g g-Whitespace">    </span><span class="mi">466</span> <span class="c1"># trigger callback</span>
 <span class="ne">--&gt; </span><span class="mi">467</span> <span class="bp">self</span><span class="o">.</span><span class="n">_trigger_callback</span><span class="p">(</span>
-<span class="g g-Whitespace">    </span><span class="mi">468</span>   <span class="s2">&quot;pick_up_tips&quot;</span><span class="p">,</span>
+<span class="g g-Whitespace">    </span><span class="mi">468</span>   <span class="s2">"pick_up_tips"</span><span class="p">,</span>
 <span class="g g-Whitespace">    </span><span class="mi">469</span>   <span class="n">liquid_handler</span><span class="o">=</span><span class="bp">self</span><span class="p">,</span>
 <span class="g g-Whitespace">    </span><span class="mi">470</span>   <span class="n">operations</span><span class="o">=</span><span class="n">pickups</span><span class="p">,</span>
 <span class="g g-Whitespace">    </span><span class="mi">471</span>   <span class="n">use_channels</span><span class="o">=</span><span class="n">use_channels</span><span class="p">,</span>
@@ -922,32 +934,32 @@ actual:   C0TPid0009xp01269 01269 01269 01269 01269 01269 01269 01269yp1458 1368
 <span class="nn">File ~/retro/pylabrobot/pylabrobot/liquid_handling/backends/hamilton/STAR.py:4062,</span> in <span class="ni">STAR.pick_up_tip</span><span class="nt">(self, x_positions, y_positions, tip_pattern, tip_type_idx, begin_tip_pick_up_process, end_tip_pick_up_process, minimum_traverse_height_at_beginning_of_a_command, pickup_method)</span>
 <span class="g g-Whitespace">   </span><span class="mi">4055</span> <span class="k">assert</span> <span class="p">(</span>
 <span class="g g-Whitespace">   </span><span class="mi">4056</span>   <span class="mi">0</span> <span class="o">&lt;=</span> <span class="n">end_tip_pick_up_process</span> <span class="o">&lt;=</span> <span class="mi">3600</span>
-<span class="g g-Whitespace">   </span><span class="mi">4057</span> <span class="p">),</span> <span class="s2">&quot;end_tip_pick_up_process must be between 0 and 3600&quot;</span>
+<span class="g g-Whitespace">   </span><span class="mi">4057</span> <span class="p">),</span> <span class="s2">"end_tip_pick_up_process must be between 0 and 3600"</span>
 <span class="g g-Whitespace">   </span><span class="mi">4058</span> <span class="k">assert</span> <span class="p">(</span>
 <span class="g g-Whitespace">   </span><span class="mi">4059</span>   <span class="mi">0</span> <span class="o">&lt;=</span> <span class="n">minimum_traverse_height_at_beginning_of_a_command</span> <span class="o">&lt;=</span> <span class="mi">3600</span>
-<span class="g g-Whitespace">   </span><span class="mi">4060</span> <span class="p">),</span> <span class="s2">&quot;minimum_traverse_height_at_beginning_of_a_command must be between 0 and 3600&quot;</span>
+<span class="g g-Whitespace">   </span><span class="mi">4060</span> <span class="p">),</span> <span class="s2">"minimum_traverse_height_at_beginning_of_a_command must be between 0 and 3600"</span>
 <span class="ne">-&gt; </span><span class="mi">4062</span> <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">send_command</span><span class="p">(</span>
-<span class="g g-Whitespace">   </span><span class="mi">4063</span>   <span class="n">module</span><span class="o">=</span><span class="s2">&quot;C0&quot;</span><span class="p">,</span>
-<span class="g g-Whitespace">   </span><span class="mi">4064</span>   <span class="n">command</span><span class="o">=</span><span class="s2">&quot;TP&quot;</span><span class="p">,</span>
+<span class="g g-Whitespace">   </span><span class="mi">4063</span>   <span class="n">module</span><span class="o">=</span><span class="s2">"C0"</span><span class="p">,</span>
+<span class="g g-Whitespace">   </span><span class="mi">4064</span>   <span class="n">command</span><span class="o">=</span><span class="s2">"TP"</span><span class="p">,</span>
 <span class="g g-Whitespace">   </span><span class="mi">4065</span>   <span class="n">tip_pattern</span><span class="o">=</span><span class="n">tip_pattern</span><span class="p">,</span>
 <span class="g g-Whitespace">   </span><span class="mi">4066</span>   <span class="n">read_timeout</span><span class="o">=</span><span class="mi">60</span><span class="p">,</span>
-<span class="g g-Whitespace">   </span><span class="mi">4067</span>   <span class="n">xp</span><span class="o">=</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">x</span><span class="si">:</span><span class="s2">05</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">x_positions</span><span class="p">],</span>
-<span class="g g-Whitespace">   </span><span class="mi">4068</span>   <span class="n">yp</span><span class="o">=</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">y</span><span class="si">:</span><span class="s2">04</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">y</span> <span class="ow">in</span> <span class="n">y_positions</span><span class="p">],</span>
+<span class="g g-Whitespace">   </span><span class="mi">4067</span>   <span class="n">xp</span><span class="o">=</span><span class="p">[</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">x</span><span class="si">:</span><span class="s2">05</span><span class="si">}</span><span class="s2">"</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">x_positions</span><span class="p">],</span>
+<span class="g g-Whitespace">   </span><span class="mi">4068</span>   <span class="n">yp</span><span class="o">=</span><span class="p">[</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">y</span><span class="si">:</span><span class="s2">04</span><span class="si">}</span><span class="s2">"</span> <span class="k">for</span> <span class="n">y</span> <span class="ow">in</span> <span class="n">y_positions</span><span class="p">],</span>
 <span class="g g-Whitespace">   </span><span class="mi">4069</span>   <span class="n">tm</span><span class="o">=</span><span class="n">tip_pattern</span><span class="p">,</span>
-<span class="g g-Whitespace">   </span><span class="mi">4070</span>   <span class="n">tt</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">tip_type_idx</span><span class="si">:</span><span class="s2">02</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
-<span class="g g-Whitespace">   </span><span class="mi">4071</span>   <span class="n">tp</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">begin_tip_pick_up_process</span><span class="si">:</span><span class="s2">04</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
-<span class="g g-Whitespace">   </span><span class="mi">4072</span>   <span class="n">tz</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">end_tip_pick_up_process</span><span class="si">:</span><span class="s2">04</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
-<span class="g g-Whitespace">   </span><span class="mi">4073</span>   <span class="n">th</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">minimum_traverse_height_at_beginning_of_a_command</span><span class="si">:</span><span class="s2">04</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<span class="g g-Whitespace">   </span><span class="mi">4070</span>   <span class="n">tt</span><span class="o">=</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">tip_type_idx</span><span class="si">:</span><span class="s2">02</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span>
+<span class="g g-Whitespace">   </span><span class="mi">4071</span>   <span class="n">tp</span><span class="o">=</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">begin_tip_pick_up_process</span><span class="si">:</span><span class="s2">04</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span>
+<span class="g g-Whitespace">   </span><span class="mi">4072</span>   <span class="n">tz</span><span class="o">=</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">end_tip_pick_up_process</span><span class="si">:</span><span class="s2">04</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span>
+<span class="g g-Whitespace">   </span><span class="mi">4073</span>   <span class="n">th</span><span class="o">=</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">minimum_traverse_height_at_beginning_of_a_command</span><span class="si">:</span><span class="s2">04</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span>
 <span class="g g-Whitespace">   </span><span class="mi">4074</span>   <span class="n">td</span><span class="o">=</span><span class="n">pickup_method</span><span class="o">.</span><span class="n">value</span><span class="p">,</span>
 <span class="g g-Whitespace">   </span><span class="mi">4075</span> <span class="p">)</span>
 
 <span class="nn">File ~/retro/pylabrobot/pylabrobot/liquid_handling/backends/hamilton/base.py:247,</span> in <span class="ni">HamiltonLiquidHandler.send_command</span><span class="nt">(self, module, command, auto_id, tip_pattern, write_timeout, read_timeout, wait, fmt, **kwargs)</span>
-<span class="g g-Whitespace">    </span><span class="mi">222</span><span class="w"> </span><span class="sd">&quot;&quot;&quot;Send a firmware command to the Hamilton machine.</span>
+<span class="g g-Whitespace">    </span><span class="mi">222</span><span class="w"> </span><span class="sd">"""Send a firmware command to the Hamilton machine.</span>
 <span class="g g-Whitespace">    </span><span class="mi">223</span><span class="sd"> </span>
 <span class="g g-Whitespace">    </span><span class="mi">224</span><span class="sd"> Args:</span>
 <span class="sd">   (...)</span>
 <span class="g g-Whitespace">    </span><span class="mi">237</span><span class="sd">   A dictionary containing the parsed response, or None if no response was read within `timeout`.</span>
-<span class="g g-Whitespace">    </span><span class="mi">238</span><span class="sd"> &quot;&quot;&quot;</span>
+<span class="g g-Whitespace">    </span><span class="mi">238</span><span class="sd"> """</span>
 <span class="g g-Whitespace">    </span><span class="mi">240</span> <span class="n">cmd</span><span class="p">,</span> <span class="n">id_</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_assemble_command</span><span class="p">(</span>
 <span class="g g-Whitespace">    </span><span class="mi">241</span>   <span class="n">module</span><span class="o">=</span><span class="n">module</span><span class="p">,</span>
 <span class="g g-Whitespace">    </span><span class="mi">242</span>   <span class="n">command</span><span class="o">=</span><span class="n">command</span><span class="p">,</span>
@@ -971,15 +983,15 @@ actual:   C0TPid0009xp01269 01269 01269 01269 01269 01269 01269 01269yp1458 1368
    <span class="p">(</span><span class="o">...</span><span class="p">)</span>
 <span class="g g-Whitespace">    </span><span class="mi">264</span>   <span class="n">wait</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
 <span class="g g-Whitespace">    </span><span class="mi">265</span> <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
-<span class="g g-Whitespace">    </span><span class="mi">266</span><span class="w">   </span><span class="sd">&quot;&quot;&quot;Write a command to the Hamilton machine and read the response.&quot;&quot;&quot;</span>
+<span class="g g-Whitespace">    </span><span class="mi">266</span><span class="w">   </span><span class="sd">"""Write a command to the Hamilton machine and read the response."""</span>
 <span class="ne">--&gt; </span><span class="mi">267</span>   <span class="bp">self</span><span class="o">.</span><span class="n">io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">cmd</span><span class="o">.</span><span class="n">encode</span><span class="p">(),</span> <span class="n">timeout</span><span class="o">=</span><span class="n">write_timeout</span><span class="p">)</span>
 <span class="g g-Whitespace">    </span><span class="mi">269</span>   <span class="k">if</span> <span class="ow">not</span> <span class="n">wait</span><span class="p">:</span>
 <span class="g g-Whitespace">    </span><span class="mi">270</span>     <span class="k">return</span> <span class="kc">None</span>
 
 <span class="nn">File ~/retro/pylabrobot/pylabrobot/io/usb.py:325,</span> in <span class="ni">USBValidator.write</span><span class="nt">(self, data, timeout)</span>
-<span class="g g-Whitespace">    </span><span class="mi">323</span> <span class="k">if</span> <span class="ow">not</span> <span class="n">next_command</span><span class="o">.</span><span class="n">data</span> <span class="o">==</span> <span class="n">data</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s2">&quot;unicode_escape&quot;</span><span class="p">):</span>
-<span class="g g-Whitespace">    </span><span class="mi">324</span>   <span class="n">align_sequences</span><span class="p">(</span><span class="n">expected</span><span class="o">=</span><span class="n">next_command</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="n">actual</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s2">&quot;unicode_escape&quot;</span><span class="p">))</span>
-<span class="ne">--&gt; </span><span class="mi">325</span>   <span class="k">raise</span> <span class="n">ValidationError</span><span class="p">(</span><span class="s2">&quot;Data mismatch: difference was written to stdout.&quot;</span><span class="p">)</span>
+<span class="g g-Whitespace">    </span><span class="mi">323</span> <span class="k">if</span> <span class="ow">not</span> <span class="n">next_command</span><span class="o">.</span><span class="n">data</span> <span class="o">==</span> <span class="n">data</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s2">"unicode_escape"</span><span class="p">):</span>
+<span class="g g-Whitespace">    </span><span class="mi">324</span>   <span class="n">align_sequences</span><span class="p">(</span><span class="n">expected</span><span class="o">=</span><span class="n">next_command</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="n">actual</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s2">"unicode_escape"</span><span class="p">))</span>
+<span class="ne">--&gt; </span><span class="mi">325</span>   <span class="k">raise</span> <span class="n">ValidationError</span><span class="p">(</span><span class="s2">"Data mismatch: difference was written to stdout."</span><span class="p">)</span>
 
 <span class="ne">ValidationError</span>: Data mismatch: difference was written to stdout.
 </pre></div>

@@ -1,0 +1,6 @@
+pylabrobot.opentrons.PipetteInfo.channels
+=========================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. autoattribute:: PipetteInfo.channels

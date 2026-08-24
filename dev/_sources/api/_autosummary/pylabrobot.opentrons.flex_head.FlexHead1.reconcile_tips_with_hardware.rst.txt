@@ -1,0 +1,6 @@
+pylabrobot.opentrons.flex\_head.FlexHead1.reconcile\_tips\_with\_hardware
+=========================================================================
+
+.. currentmodule:: pylabrobot.opentrons.flex_head
+
+.. automethod:: FlexHead1.reconcile_tips_with_hardware

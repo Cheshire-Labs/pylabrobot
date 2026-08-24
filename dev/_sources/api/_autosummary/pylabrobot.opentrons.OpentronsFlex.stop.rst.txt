@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsFlex.stop
+=======================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsFlex.stop

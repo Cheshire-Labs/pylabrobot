@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsFlex.forget\_pipetting\_position
+==============================================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsFlex.forget_pipetting_position

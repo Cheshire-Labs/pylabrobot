@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsRobot.cancel\_run
+===============================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsRobot.cancel_run

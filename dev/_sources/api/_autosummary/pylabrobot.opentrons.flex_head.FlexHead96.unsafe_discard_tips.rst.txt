@@ -1,0 +1,6 @@
+pylabrobot.opentrons.flex\_head.FlexHead96.unsafe\_discard\_tips
+================================================================
+
+.. currentmodule:: pylabrobot.opentrons.flex_head
+
+.. automethod:: FlexHead96.unsafe_discard_tips

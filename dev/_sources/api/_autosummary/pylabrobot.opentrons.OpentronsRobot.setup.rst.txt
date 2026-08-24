@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsRobot.setup
+=========================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsRobot.setup

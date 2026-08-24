@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsFlex.initialize
+=============================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsFlex.initialize

@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsFlex.set\_status\_bar
+===================================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsFlex.set_status_bar

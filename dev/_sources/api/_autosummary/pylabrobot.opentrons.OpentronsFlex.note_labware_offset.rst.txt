@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsFlex.note\_labware\_offset
+========================================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsFlex.note_labware_offset

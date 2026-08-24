@@ -1,0 +1,6 @@
+pylabrobot.opentrons.PipetteInfo.max\_volume
+============================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. autoattribute:: PipetteInfo.max_volume

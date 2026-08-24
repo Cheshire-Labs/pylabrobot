@@ -1,0 +1,48 @@
+﻿:orphan:
+
+
+pylabrobot.opentrons.OpentronsFlex
+==================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. autoclass:: OpentronsFlex
+
+   
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      ~OpentronsFlex.__init__
+      ~OpentronsFlex.add_comment
+      ~OpentronsFlex.attach_deck
+      ~OpentronsFlex.cancel_run
+      ~OpentronsFlex.connect
+      ~OpentronsFlex.create_run
+      ~OpentronsFlex.disconnect
+      ~OpentronsFlex.forget_pipetting_position
+      ~OpentronsFlex.home
+      ~OpentronsFlex.initialize
+      ~OpentronsFlex.labware_moved_off_deck
+      ~OpentronsFlex.move_axes_relative
+      ~OpentronsFlex.move_axes_to
+      ~OpentronsFlex.note_labware_offset
+      ~OpentronsFlex.reload_labware
+      ~OpentronsFlex.retract_axis
+      ~OpentronsFlex.run_is_live
+      ~OpentronsFlex.send_command
+      ~OpentronsFlex.set_rail_lights
+      ~OpentronsFlex.set_status_bar
+      ~OpentronsFlex.setup
+      ~OpentronsFlex.stop
+      ~OpentronsFlex.sync_tips_to_robot
+      ~OpentronsFlex.wait_for_duration
+      ~OpentronsFlex.well_bottom_deck_z
+   
+   

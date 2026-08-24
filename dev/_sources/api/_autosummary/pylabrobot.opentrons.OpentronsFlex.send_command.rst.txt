@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsFlex.send\_command
+================================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsFlex.send_command

@@ -1,0 +1,6 @@
+pylabrobot.opentrons.PipetteInfo.\_\_init\_\_
+=============================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: PipetteInfo.__init__

@@ -1,0 +1,6 @@
+pylabrobot.opentrons.OpentronsFlex.reload\_labware
+==================================================
+
+.. currentmodule:: pylabrobot.opentrons
+
+.. automethod:: OpentronsFlex.reload_labware
