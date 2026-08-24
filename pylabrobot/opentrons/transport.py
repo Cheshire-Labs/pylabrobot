@@ -235,6 +235,7 @@ class ChatterboxTransport:
     simulate_stuck_tip: bool = False,
     liquid_probe_z: Optional[float] = None,
     simulate_liquid_probe_not_found: bool = False,
+    robot_labware_definitions: Optional[Dict[str, Dict[str, Any]]] = None,
     gripper: bool = False,
     saved_position: Optional[Dict[str, float]] = None,
     api_version: str = OFFLINE_API_VERSION,
@@ -262,15 +263,22 @@ class ChatterboxTransport:
       stuck to the nozzle after a drop, so ``_FlexHead._confirm_tips_cleared()``
       reads "present" and logs a warning. Default False: a drop always clears
       the sensor (existing behavior).
-    liquid_probe_z: the liquid height (mm) a ``liquidProbe``/``tryLiquidProbe``
-      command reports as ``z_position`` in its result. Default None: the key
-      is omitted from the result entirely (not set to null), matching the
-      real robot-server's shape when no liquid is found.
+    liquid_probe_z: the DECK-frame z (mm) a ``liquidProbe``/``tryLiquidProbe``
+      command reports as ``z_position`` in its result, which is the frame the
+      real robot answers in. Default None: the key is omitted from the result
+      entirely (not set to null), matching the real robot-server's shape when
+      no liquid is found.
     simulate_liquid_probe_not_found: if True, a ``liquidProbe`` command FAILS
       with the engine's defined "liquidNotFound" error -- the real-hardware
       behavior when no liquid is detected -- instead of succeeding with the
       ``z_position`` key absent. ``tryLiquidProbe`` is unaffected: it
       genuinely succeeds with the key absent. Default False.
+    robot_labware_definitions: definitions the simulated robot already holds,
+      keyed by load name, echoed in a ``loadLabware`` result the way the real
+      robot-server does. A custom definition uploaded in the same session is
+      echoed without being listed here. Default None: the robot holds none, so
+      loading by an official name reports no definition and a caller that needs
+      the geometry says so.
     gripper: if True, ``/instruments`` also reports a gripper on the extension
       mount, so tests can drive gripper discovery. Default False: no gripper
       mounted (existing behavior).
@@ -304,6 +312,9 @@ class ChatterboxTransport:
     self.simulate_failed_pickup = simulate_failed_pickup
     self.simulate_stuck_tip = simulate_stuck_tip
     self.liquid_probe_z = liquid_probe_z
+    self.robot_labware_definitions: Dict[str, Dict[str, Any]] = dict(
+      robot_labware_definitions or {}
+    )
     self.simulate_liquid_probe_not_found = simulate_liquid_probe_not_found
     self.saved_position = saved_position
     # Per-mount simulated hardware tip-presence sensor state (Flex reports
@@ -492,6 +503,26 @@ class ChatterboxTransport:
       )
     return None
 
+  def _definition_for_load(self, load_name: str) -> Optional[Dict[str, Any]]:
+    """The definition a ``loadLabware`` result carries, or None if the robot has none.
+
+    A definition uploaded in this session wins over one the robot ships with,
+    the same way the server serves back whatever it stored for the name.
+
+    A real robot always answers with one, because it holds the vendor definition
+    for every official load name. This transport holds none of those, so a caller
+    simulating official-name labware has to pass the definitions it cares about as
+    ``robot_labware_definitions``. Without them the load reports no definition and
+    anything measured against it refuses -- which is the honest answer, since
+    inventing geometry here is exactly the wrong-by-millimetres number the driver
+    reads the run's definition to avoid.
+    """
+    for definition in reversed(self.labware_definitions):
+      if definition.get("parameters", {}).get("loadName") == load_name:
+        return dict(definition)
+    stored = self.robot_labware_definitions.get(load_name)
+    return dict(stored) if stored is not None else None
+
   async def post(self, path: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if path == "/runs":
       self._run_count += 1
@@ -556,6 +587,9 @@ class ChatterboxTransport:
         self._labware_load_count += 1
         labware_id = f"chatterbox-labware-{self._labware_load_count}"
         result = {"labwareId": labware_id}
+        definition = self._definition_for_load(str(params.get("loadName")))
+        if definition is not None:
+          result["definition"] = definition
         self.labware_ids[str(params.get("displayName"))] = labware_id
       else:
         result = {}

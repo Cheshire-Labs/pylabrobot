@@ -1353,27 +1353,26 @@ class FlexHead1(_FlexHead):
       "touchTip", self._touch_tip_params(labware_id, well_name, radius, offset)
     )
 
-  async def liquid_probe(self, well: Well) -> float:
-    """Probe downward in ``well`` until the pressure sensor detects liquid; return its z (mm).
+  async def liquid_probe(self, target: Union[Well, Container]) -> float:
+    """Probe down in ``target`` until the pressure sensor finds liquid; return its z (mm).
 
-    One ``liquidProbe`` command naming ``well``. Requires a mounted tip
-    (checked before any wire command). Raises ``OpentronsError`` if no
-    liquid is found; use ``try_liquid_probe`` for the non-raising variant.
+    One ``liquidProbe`` command naming a well of a plate, or a bare
+    ``Container`` (trough/reservoir) at its own sole well. The z is in DECK
+    space, which is what the robot reports; ``well_bottom_deck_z`` is what turns
+    it into a height above the well floor. Requires a mounted tip (checked
+    before any wire command). Raises ``OpentronsError`` if no liquid is found;
+    use ``try_liquid_probe`` for the non-raising variant.
     """
     self._warn_untested_hardware("liquid_probe")
     self._require_mounted_tip()
-    parent = self._require_itemized_parent(well)
-    labware_id = await self.flex._ensure_labware_loaded(parent)
-    well_name = parent.get_child_identifier(well)
-    return await self._liquid_probe_z(labware_id, well_name, f"well {well.name!r}")
+    labware_id, well_name = await self._well_target(target)
+    return await self._liquid_probe_z(labware_id, well_name, f"{target.name!r}")
 
-  async def try_liquid_probe(self, well: Well) -> Optional[float]:
+  async def try_liquid_probe(self, target: Union[Well, Container]) -> Optional[float]:
     """Like ``liquid_probe`` but return ``None`` instead of raising when no liquid is found."""
     self._warn_untested_hardware("try_liquid_probe")
     self._require_mounted_tip()
-    parent = self._require_itemized_parent(well)
-    labware_id = await self.flex._ensure_labware_loaded(parent)
-    well_name = parent.get_child_identifier(well)
+    labware_id, well_name = await self._well_target(target)
     return await self._probe_z("tryLiquidProbe", labware_id, well_name)
 
 
@@ -2247,7 +2246,10 @@ class FlexHead8(_FlexHead):
 
   async def liquid_probe(self, plate: Plate, column: int) -> float:
     """Probe for liquid in a column -- one ``liquidProbe`` command anchored at
-    its rearmost well; return the found liquid z (mm).
+    its rearmost well; return the found liquid z (mm), in deck space.
+
+    One command, so one reading for the whole column: the head reads its
+    pressure sensors together rather than per nozzle.
 
     Requires at least one mounted tip and a valid column (both checked
     before any wire command) and ALL nozzle mode (reset first if a
@@ -2270,6 +2272,29 @@ class FlexHead8(_FlexHead):
     await self._ensure_all_mode()
     labware_id = await self.flex._ensure_labware_loaded(plate)
     return await self._probe_z("tryLiquidProbe", labware_id, well_name)
+
+  async def liquid_probe_container(self, container: Container) -> float:
+    """Probe a single-cavity container -- one ``liquidProbe`` at its sole well.
+
+    Mirrors ``aspirate_container``: all nozzles share the one cavity, so one
+    command reads it. Returns the found liquid z in deck space. Requires a
+    mounted tip and ALL nozzle mode.
+    """
+    self._warn_untested_hardware("liquid_probe_container")
+    self._require_mounted_tip()
+    self._require_span_fits_container(container, 0.0, _EIGHT_CHANNEL_Y_SPAN, None)
+    await self._ensure_all_mode()
+    labware_id = await self.flex._ensure_labware_loaded(container)
+    return await self._liquid_probe_z(labware_id, _CONTAINER_WELL_NAME, f"{container.name!r}")
+
+  async def try_liquid_probe_container(self, container: Container) -> Optional[float]:
+    """Like ``liquid_probe_container`` but returns ``None`` when no liquid is found."""
+    self._warn_untested_hardware("try_liquid_probe_container")
+    self._require_mounted_tip()
+    self._require_span_fits_container(container, 0.0, _EIGHT_CHANNEL_Y_SPAN, None)
+    await self._ensure_all_mode()
+    labware_id = await self.flex._ensure_labware_loaded(container)
+    return await self._probe_z("tryLiquidProbe", labware_id, _CONTAINER_WELL_NAME)
 
   # --- Single-tip cherry-pick ---
 
@@ -2525,6 +2550,29 @@ class FlexHead8(_FlexHead):
     await self._pipette(
       "dispense", labware_id, well, volume, flow_rate, None, liquid_height, staged_trackers
     )
+
+  async def liquid_probe_single(self, plate: Plate, well: str) -> float:
+    """Probe one well with the currently mounted single tip; return its liquid z (mm).
+
+    The column ``liquid_probe`` cannot serve a cherry-pick: it resets the head
+    to ALL nozzle mode, which is refused while a tip is mounted. Same
+    single-layout reach and clearance rules as ``aspirate_single``.
+    """
+    self._warn_untested_hardware("liquid_probe_single")
+    await self._ensure_anchored_on_mounted_channel()
+    self._require_reach_in_single_layout(plate, well)
+    self._require_single_nozzle_clearance(plate)
+    labware_id = await self.flex._ensure_labware_loaded(plate)
+    return await self._liquid_probe_z(labware_id, well, f"well {well!r} of {plate.name!r}")
+
+  async def try_liquid_probe_single(self, plate: Plate, well: str) -> Optional[float]:
+    """Like ``liquid_probe_single`` but returns ``None`` when no liquid is found."""
+    self._warn_untested_hardware("try_liquid_probe_single")
+    await self._ensure_anchored_on_mounted_channel()
+    self._require_reach_in_single_layout(plate, well)
+    self._require_single_nozzle_clearance(plate)
+    labware_id = await self.flex._ensure_labware_loaded(plate)
+    return await self._probe_z("tryLiquidProbe", labware_id, well)
 
   async def drop_single_tip(self, trash: Trash) -> None:
     """Drop the single mounted tip to trash and restore ALL nozzle mode.

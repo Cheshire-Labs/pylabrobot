@@ -147,7 +147,7 @@ class FlexGripper:
     # The gripper rides the same x/y gantry as the pipettes, and this moves
     # the labware itself, so no pipetting position survives it.
     async with self.flex._moving_to(None):
-      await self.flex._execute_command(
+      result = await self.flex._execute_command(
         "moveLabware",
         {
           "labwareId": labware_id,
@@ -156,6 +156,7 @@ class FlexGripper:
         },
         timeout=_MOVE_LABWARE_TIMEOUT,
       )
+    self.flex._note_labware_offset(name, result)
 
     deck.unassign_child_at_slot(from_slot)
     deck.assign_child_at_slot(resource, to_slot)
