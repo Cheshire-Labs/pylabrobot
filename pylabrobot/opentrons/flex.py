@@ -50,11 +50,33 @@ _CHANNELS_TO_HEAD: Dict[int, Type[_FlexHead]] = {
 }
 
 
+def _corner_offset_z(definition: Dict[str, Any]) -> Optional[float]:
+  """How far above its slot a definition puts the labware's origin.
+
+  Schema 2 states it outright. Schema 3 dropped the field and states the same
+  distance as the labware's own back-left-bottom extent. A definition doing
+  neither is not read as zero: that would put every well's floor exactly one
+  unknown offset out.
+  """
+  corner = definition.get("cornerOffsetFromSlot")
+  if isinstance(corner, dict) and "z" in corner:
+    return float(corner["z"])
+  extents = definition.get("extents")
+  if isinstance(extents, dict):
+    back_left_bottom = extents.get("total", {}).get("backLeftBottom", {})
+    if isinstance(back_left_bottom, dict) and "z" in back_left_bottom:
+      return float(back_left_bottom["z"])
+  return None
+
+
 class _LoadedGeometry(NamedTuple):
   """The parts of a run's labware definition a deck z has to be framed against."""
 
   wells: Dict[str, Dict[str, Any]]
-  corner_offset_z: float
+  corner_offset_z: Optional[float]
+  """Where the definition puts the labware's origin above its slot. None when the
+  definition states it in a form this driver does not read, which refuses a height
+  rather than measuring it from a floor assumed to sit at the slot."""
   offset_id: Optional[str]
   """The labware offset the run applied, if any. PyLabRobot creates runs with no
   offsets, so this is None in practice; it is read so a run that does carry one
@@ -389,7 +411,7 @@ class OpentronsFlex(OpentronsRobot):
     if isinstance(definition, dict):
       self._loaded_geometry[name] = _LoadedGeometry(
         wells=cast(Dict[str, Dict[str, Any]], definition.get("wells", {})),
-        corner_offset_z=float(definition.get("cornerOffsetFromSlot", {}).get("z", 0.0)),
+        corner_offset_z=_corner_offset_z(definition),
         offset_id=cast(Optional[str], result.get("result", {}).get("offsetId")),
       )
     logger.info(
@@ -401,6 +423,20 @@ class OpentronsFlex(OpentronsRobot):
     )
     return labware_id
 
+  def note_labware_offset(self, name: str, result: Dict[str, Any]) -> None:
+    """Carry the offset a command reported onto the cached geometry.
+
+    A reload or a gripper move re-places the labware and hands back the offset
+    the robot applied. Left uncarried, the offset recorded at load time keeps
+    saying "none applied" and a floor measured against the definition is wrong
+    by exactly the offset nobody noticed.
+    """
+    loaded = self._loaded_geometry.get(name)
+    if loaded is None:
+      return
+    offset_id = cast(Optional[str], result.get("result", {}).get("offsetId"))
+    self._loaded_geometry[name] = loaded._replace(offset_id=offset_id)
+
   def well_bottom_deck_z(self, resource: Resource, well_name: str) -> float:
     """Deck z of the floor one well's ``liquid_height`` is measured from.
 
@@ -410,12 +446,25 @@ class OpentronsFlex(OpentronsRobot):
     robot does not share -- and a probe reports a deck z, which is only useful
     once it is put back into the frame a caller pipettes in.
     """
+    if resource.name in self._stub_labware:
+      raise OpentronsError(
+        "Labware has no pipettable geometry",
+        f"'{resource.name}' was uploaded as a stub because it has no wells to pipette "
+        "into, so the definition the run holds says nothing about where liquid sits.",
+      )
     loaded = self._loaded_geometry.get(resource.name)
     if loaded is None:
       raise OpentronsError(
         "Labware geometry unknown",
         f"the run reported no definition for '{resource.name}', so the floor its liquid "
         "heights are measured from is unknown.",
+      )
+    if loaded.corner_offset_z is None:
+      raise OpentronsError(
+        "Labware geometry unknown",
+        f"the definition loaded for '{resource.name}' states how far it sits above its "
+        "slot in a form this driver does not read, so a floor derived from it would be "
+        "wrong by that distance.",
       )
     if loaded.offset_id is not None:
       raise OpentronsError(
@@ -512,7 +561,8 @@ class OpentronsFlex(OpentronsRobot):
     it to another slot, and ``labware_moved_off_deck`` when it leaves the deck.
     """
     labware_id = await self._ensure_labware_loaded(resource)
-    await self._execute_command("reloadLabware", {"labwareId": labware_id})
+    result = await self._execute_command("reloadLabware", {"labwareId": labware_id})
+    self.note_labware_offset(resource.name, result)
 
   # --- Robot-level commands: axis motion, status surfaces, run log ---
 

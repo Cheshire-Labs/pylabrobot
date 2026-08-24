@@ -26,8 +26,8 @@ import unittest
 from typing import Any, Dict, Optional
 
 from pylabrobot.opentrons.flex import OpentronsFlex
-from pylabrobot.opentrons.flex_head import FlexHead1
 from pylabrobot.opentrons.flex_container_tests import _make_trough
+from pylabrobot.opentrons.flex_head import FlexHead1
 from pylabrobot.opentrons.flex_tests import _flex_head1, _flex_head8, _flex_head96
 from pylabrobot.opentrons.robot import OpentronsCommandError, OpentronsError
 from pylabrobot.opentrons.transport import ChatterboxTransport
@@ -355,9 +355,10 @@ class TestTouchTipHead96(unittest.TestCase):
       asyncio.run(flex.stop())
 
 
-# The vendor's own numbers for corning_96_wellplate_360ul_flat. A probe answers in
-# DECK space, so the well's floor is what turns that into a height a caller can
-# pipette with, and the robot is the only place that floor comes from.
+# Definitions a simulated robot answers loads with. The numbers are this fixture's,
+# deliberately not any real vendor's: what is under test is that the driver reports
+# the floor the RUN stated, so a value that matched PyLabRobot's own geometry would
+# pass whether or not the run was consulted.
 _CORNING_FLAT = "corning_96_wellplate_360ul_flat"
 _CORNING_WELL_FLOOR_Z = 3.552
 _NEST_RESERVOIR = "nest_1_reservoir_195ml"
@@ -1583,9 +1584,6 @@ class TestUnsafeRecoveryOps(unittest.TestCase):
       asyncio.run(flex.stop())
 
 
-if __name__ == "__main__":
-  unittest.main()
-
 
 class TestContainerAndSingleNozzleProbes(unittest.TestCase):
   """The two probe shapes the heads had no way to reach.
@@ -1757,3 +1755,105 @@ class TestWellBottomDeckZ(unittest.TestCase):
       self.assertIn("H12", str(caught.exception))
     finally:
       asyncio.run(flex.stop())
+
+
+  def test_every_term_of_the_sum_reaches_the_answer(self):
+    """The floor is where the labware sits, plus how far the definition lifts its
+    origin above the slot, plus the well's own depth into it. All three were zero
+    in the fixtures above, so dropping any of them went unnoticed."""
+    lifted = {
+      _NEST_RESERVOIR: {
+        "parameters": {"loadName": _NEST_RESERVOIR},
+        "cornerOffsetFromSlot": {"x": 0, "y": 0, "z": 4.0},
+        "wells": {"A1": {"z": 2.5, "depth": 25.0}},
+      }
+    }
+    flex, _transport, _head = _flex_head1(robot_labware_definitions=lifted)
+    try:
+      trough = self._trough_on_deck(flex)
+      asyncio.run(flex._ensure_labware_loaded(trough))
+      slot_z = trough.get_absolute_location(z="b").z
+
+      self.assertAlmostEqual(flex.well_bottom_deck_z(trough, "A1"), slot_z + 4.0 + 2.5)
+
+      trough.location = Coordinate(trough.location.x, trough.location.y, trough.location.z + 10.0)
+      self.assertAlmostEqual(
+        flex.well_bottom_deck_z(trough, "A1"), slot_z + 10.0 + 4.0 + 2.5
+      )
+    finally:
+      asyncio.run(flex.stop())
+
+  def test_it_reads_a_schema_3_definition_that_states_the_offset_as_an_extent(self):
+    """Schema 3 dropped ``cornerOffsetFromSlot`` and states the same distance as
+    the labware's back-left-bottom extent."""
+    schema3 = {
+      _NEST_RESERVOIR: {
+        "parameters": {"loadName": _NEST_RESERVOIR},
+        "extents": {"total": {"backLeftBottom": {"x": 0, "y": 0, "z": 4.0}}},
+        "wells": {"A1": {"z": 2.5, "depth": 25.0}},
+      }
+    }
+    flex, _transport, _head = _flex_head1(robot_labware_definitions=schema3)
+    try:
+      trough = self._trough_on_deck(flex)
+      asyncio.run(flex._ensure_labware_loaded(trough))
+      slot_z = trough.get_absolute_location(z="b").z
+
+      self.assertAlmostEqual(flex.well_bottom_deck_z(trough, "A1"), slot_z + 4.0 + 2.5)
+    finally:
+      asyncio.run(flex.stop())
+
+  def test_it_refuses_a_definition_that_states_the_offset_in_neither_form(self):
+    """Reading a missing offset as zero would put every floor out by however far
+    the labware actually sits above its slot."""
+    silent = {
+      _NEST_RESERVOIR: {
+        "parameters": {"loadName": _NEST_RESERVOIR},
+        "wells": {"A1": {"z": 2.5, "depth": 25.0}},
+      }
+    }
+    flex, _transport, _head = _flex_head1(robot_labware_definitions=silent)
+    try:
+      trough = self._trough_on_deck(flex)
+      asyncio.run(flex._ensure_labware_loaded(trough))
+
+      with self.assertRaises(OpentronsError) as caught:
+        flex.well_bottom_deck_z(trough, "A1")
+      self.assertIn("does not read", str(caught.exception))
+    finally:
+      asyncio.run(flex.stop())
+
+  def test_an_offset_applied_after_the_load_still_refuses(self):
+    """A reload re-places the labware and reports the offset it applied. Left
+    uncarried, the ``None`` recorded at load time reads as "no offset"."""
+
+    class _ReloadOffsetTransport(ChatterboxTransport):
+      async def post(self, path: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        response = await super().post(path, json)
+        data = response.get("data", {})
+        if data.get("commandType") == "reloadLabware":
+          data["result"]["offsetId"] = "offset-after-reload"
+        return response
+
+    transport = _ReloadOffsetTransport(
+      pipettes=[("p1000_single_flex", 1, 1.0, 1000.0, "right")],
+      robot_labware_definitions=_ROBOT_DEFINITIONS,
+    )
+    flex = OpentronsFlex(deck=FlexDeck(), host="localhost", transport=transport)
+    asyncio.run(flex.setup())
+    try:
+      trough = self._trough_on_deck(flex)
+      asyncio.run(flex._ensure_labware_loaded(trough))
+      self.assertAlmostEqual(flex.well_bottom_deck_z(trough, "A1"), _NEST_FLOOR_Z)
+
+      asyncio.run(flex.reload_labware(trough))
+
+      with self.assertRaises(OpentronsError) as caught:
+        flex.well_bottom_deck_z(trough, "A1")
+      self.assertIn("offset-after-reload", str(caught.exception))
+    finally:
+      asyncio.run(flex.stop())
+
+
+if __name__ == "__main__":
+  unittest.main()
