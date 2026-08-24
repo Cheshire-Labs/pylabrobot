@@ -249,9 +249,12 @@ class OpentronsBackendCommandTests(unittest.IsolatedAsyncioTestCase):
     def still_moving(command_id, **kwargs):
       return {"data": {"status": answers.pop(0), "result": {}}}
 
-    self.backend.request_timeout = 0.05
+    # Every one of these requests is a mock that returns at once, so the budget is
+    # only ever spent handing the call to a thread. Keep it well clear of what that
+    # costs on a loaded machine: what this test is about is the total outlasting it.
+    self.backend.request_timeout = 1.0
     self.backend.command_timeout = 5.0
-    self.backend.status_poll_interval = 0.05
+    self.backend.status_poll_interval = 0.5
     with patch("ot_api.runs.get_command", side_effect=still_moving):
       started = time.monotonic()
       await self.backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
