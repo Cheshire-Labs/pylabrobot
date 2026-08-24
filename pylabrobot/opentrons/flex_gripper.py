@@ -144,15 +144,18 @@ class FlexGripper:
     labware_id = await self.flex._ensure_labware_loaded(
       resource, allow_stub=True, grip_distance_from_top=grip_distance_from_top
     )
-    await self.flex._execute_command(
-      "moveLabware",
-      {
-        "labwareId": labware_id,
-        "newLocation": slot_wire_location(to_slot),
-        "strategy": "usingGripper",
-      },
-      timeout=_MOVE_LABWARE_TIMEOUT,
-    )
+    # The gripper rides the same x/y gantry as the pipettes, and this moves
+    # the labware itself, so no pipetting position survives it.
+    async with self.flex._moving_to(None):
+      await self.flex._execute_command(
+        "moveLabware",
+        {
+          "labwareId": labware_id,
+          "newLocation": slot_wire_location(to_slot),
+          "strategy": "usingGripper",
+        },
+        timeout=_MOVE_LABWARE_TIMEOUT,
+      )
 
     deck.unassign_child_at_slot(from_slot)
     deck.assign_child_at_slot(resource, to_slot)
@@ -187,7 +190,9 @@ class FlexGripper:
     params: Dict[str, Any] = {"mount": "extension", "destination": {"x": x, "y": y, "z": z}}
     if speed is not None:
       params["speed"] = speed
-    await self.flex._execute_command("robot/moveTo", params)
+    # One gantry: driving the gripper across the deck moves the pipettes too.
+    async with self.flex._moving_to(None):
+      await self.flex._execute_command("robot/moveTo", params)
 
   async def grip(self, force: Optional[float] = None) -> None:
     """Close the gripper jaw around whatever sits between its paddles.
