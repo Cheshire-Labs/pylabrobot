@@ -13,7 +13,7 @@ from typing import Dict, Literal
 from pylabrobot.brooks.precise_flex.kinematics import JointPose
 
 from . import kinematics
-from .kinematics import ApproachDirection, WorkEnvelope
+from .kinematics import WorkEnvelope
 
 # -- axis addressing -------------------------------------------------------
 
@@ -33,31 +33,6 @@ class Axis(IntEnum):
 
 
 # -- device configuration --------------------------------------------------
-
-
-@dataclass(frozen=True)
-class StationAccess:
-  """How the arm reaches a station and backs out of it.
-
-  These are the firmware ``StationType`` values. The defaults reproduce the
-  station the driver used to configure for every location.
-
-  Attributes:
-    approach: Reach the plate from above (an open nest) or from the side (a hotel).
-    clearance: ZClearance in mm. Distance backed off from the plate when
-      approaching and departing.
-    z_above: ZAbove in mm. Vertical offset used with a horizontal approach.
-    grasp_offset: ZGrasp in mm. Extra height the retreat rises while a plate is in the
-      jaws, on top of the resource and the travel margin, so a deep nest lets the skirt
-      out. Empty jaws do not take it: neither a pick that caught nothing nor a place
-      after the release. Nor does a horizontal station, which leaves by ``z_above`` and
-      then withdraws level, with a shelf overhead and no room to rise into.
-  """
-
-  approach: ApproachDirection = "vertical"
-  clearance: float = 100.0
-  z_above: float = 0.0
-  grasp_offset: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -106,7 +81,7 @@ class PreciseFlexConfiguration:
   reach_class: Literal["standard", "extended", "unknown"] = "extended"
 
   @property
-  def gripper_axis_limits(self) -> tuple[float, float]:
+  def gripper_width_range(self) -> tuple[float, float]:
     """Travel limits of the gripper axis, in the controller's own units.
 
     Not millimetres: a jaw width reaches these through

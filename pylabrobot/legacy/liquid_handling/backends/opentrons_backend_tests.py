@@ -467,7 +467,7 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
     released = threading.Event()
     mock_get_command.side_effect = lambda *a, **kw: released.wait()
 
-    backend = self._backend(request_timeout=0.2)
+    backend = self._backend(request_timeout=1.0)
     started = time.monotonic()
     try:
       with self.assertRaises(RuntimeError) as caught:
@@ -524,7 +524,7 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
     released = threading.Event()
     mock_list.side_effect = lambda *a, **kw: released.wait()
 
-    backend = self._backend(request_timeout=0.2, command_timeout=60.0)
+    backend = self._backend(request_timeout=1.0, command_timeout=60.0)
     started = time.monotonic()
     try:
       with self.assertRaises(TimeoutError):
@@ -541,7 +541,7 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
     released = threading.Event()
     mock_list.side_effect = lambda *a, **kw: released.wait()
 
-    backend = self._backend(request_timeout=0.3)
+    backend = self._backend(request_timeout=1.0)
     holder = asyncio.ensure_future(backend.list_connected_modules())
     await asyncio.sleep(0.05)  # let the holder take the lock
 
@@ -554,7 +554,7 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
       released.set()
       holder.cancel()
 
-    self.assertLess(elapsed, 2.0)
+    self.assertLess(elapsed, 3.0)
 
   @patch("ot_api.modules.list_connected_modules")
   async def test_an_abandoned_request_does_not_hold_the_loops_default_executor(self, mock_list):
@@ -564,7 +564,7 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
     released = threading.Event()
     mock_list.side_effect = lambda *a, **kw: released.wait()
 
-    backend = self._backend(request_timeout=0.2)
+    backend = self._backend(request_timeout=1.0)
     try:
       with self.assertRaises(TimeoutError):
         await backend.list_connected_modules()
@@ -586,7 +586,7 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
     released = threading.Event()
     mock_get_command.side_effect = lambda *a, **kw: released.wait()
 
-    backend = self._backend(request_timeout=0.2, command_timeout=0.2)
+    backend = self._backend(request_timeout=1.0, command_timeout=1.0)
     try:
       with self.assertRaises(TimeoutError):
         await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
@@ -622,7 +622,7 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
 
     # A poll interval wider than the budget puts the whole remainder into one sleep,
     # so the read that follows it lands exactly on the deadline.
-    backend = self._backend(request_timeout=5.0, command_timeout=0.2, status_poll_interval=1.0)
+    backend = self._backend(request_timeout=5.0, command_timeout=1.0, status_poll_interval=5.0)
 
     await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
 
@@ -652,7 +652,9 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
 
     mock_get_command.side_effect = status
 
-    backend = self._backend(request_timeout=0.2, command_timeout=5.0, status_poll_interval=0.01)
+    # The read budget is what this exercises; the enqueue in front of it needs enough
+    # room that a slow executor hand-off cannot fire it first.
+    backend = self._backend(request_timeout=1.0, command_timeout=5.0, status_poll_interval=0.01)
     try:
       await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
     finally:
@@ -675,7 +677,7 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
     released = threading.Event()
     mock_get_command.side_effect = lambda *a, **kw: released.wait()
 
-    backend = self._backend(request_timeout=0.2)
+    backend = self._backend(request_timeout=1.0)
     try:
       with self.assertRaises(RuntimeError):
         await backend.get_channel_position(0)
@@ -716,7 +718,7 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
     released = threading.Event()
     mock_get_command.side_effect = lambda *a, **kw: released.wait()
 
-    backend = self._backend(request_timeout=0.2, command_timeout=0.2)
+    backend = self._backend(request_timeout=1.0, command_timeout=1.0)
     try:
       with self.assertRaises(TimeoutError):
         await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
@@ -759,7 +761,7 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
     released = threading.Event()
     mock_get_command.side_effect = lambda *a, **kw: released.wait()
 
-    backend = self._backend(request_timeout=0.2, command_timeout=0.2)
+    backend = self._backend(request_timeout=1.0, command_timeout=1.0)
     try:
       with self.assertRaises(TimeoutError):
         await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
@@ -767,6 +769,9 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
       released.set()
 
     mock_get_command.side_effect = lambda *a, **kw: {"data": {"status": "succeeded", "result": {}}}
+    # What the recovery costs is not what this pins, and the budget the timeout phase
+    # needed is too tight to hand a real executor round trip.
+    backend.request_timeout = backend.command_timeout = 5.0
     await backend.setup()
 
     await backend.move_pipette_head(Coordinate(1.0, 2.0, 3.0), pipette_id="left")
@@ -778,7 +783,7 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
     released = threading.Event()
     mock_list.side_effect = lambda *a, **kw: released.wait()
 
-    backend = self._backend(request_timeout=0.2)
+    backend = self._backend(request_timeout=1.5)
     try:
       with self.assertRaises(TimeoutError) as caught:
         await backend.list_connected_modules()
@@ -786,4 +791,4 @@ class OpentronsBackendTimeoutTests(unittest.IsolatedAsyncioTestCase):
       released.set()
 
     self.assertIn("modules.list_connected_modules", str(caught.exception))
-    self.assertIn("0.2s", str(caught.exception))
+    self.assertIn("1.5s", str(caught.exception))

@@ -40,7 +40,6 @@ class CartesianPose:
 
 ElbowOrientation = Literal["right", "left"]
 Wrist = Literal["cw", "ccw"]
-ApproachDirection = Literal["vertical", "horizontal"]
 
 
 @dataclass

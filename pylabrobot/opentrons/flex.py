@@ -158,7 +158,6 @@ class OpentronsFlex(OpentronsRobot):
     host: str,
     port: int = 31950,
     transport: Optional[OpentronsTransport] = None,
-    request_timeout: Optional[float] = None,
     command_timeout: float = DEFAULT_COMMAND_TIMEOUT,
     status_poll_interval: float = DEFAULT_STATUS_POLL_INTERVAL,
   ) -> None:
@@ -166,7 +165,6 @@ class OpentronsFlex(OpentronsRobot):
       host=host,
       port=port,
       transport=transport,
-      request_timeout=request_timeout,
       command_timeout=command_timeout,
       status_poll_interval=status_poll_interval,
     )
@@ -568,10 +566,10 @@ class OpentronsFlex(OpentronsRobot):
 
   # --- Robot-level commands: axis motion, status surfaces, run log ---
 
-  async def home(self) -> Dict[str, Any]:
+  async def home(self, timeout: Optional[float] = None) -> Dict[str, Any]:
     """Home all axes; the gantry parks at the rear-left-top, over no labware."""
     async with self._moving_to(None):
-      return await super().home()
+      return await super().home(timeout=timeout)
 
   async def move_axes_to(
     self,
