@@ -44,10 +44,18 @@ logger = logging.getLogger(__name__)
 # Float dust allowed when a converted jaw width is compared with the axis limit it
 # was derived from.
 _GRIPPER_UNIT_EPS = 1e-6
+_GRIPPER_LIMIT_HEADROOM = 0.5
+"""How far inside its soft limits a commanded gripper target is held, in axis units.
+
+The servo overshoots: commanding the advertised maximum landed the axis at 134.062
+against a limit of 134.0, and the controller then refused every move until the arm
+was homed. Nothing gains from driving to the exact end, so no caller is allowed to."""
 
 # Both in gripper-axis units, relative to the calibrated grip position. Opening is a small
 # step off the plate rather than a sweep to the stop, which is a long move to no purpose.
-_JAW_OPENING = 10.0
+# 14 clears an SBS skirt by a few mm a side: measured on the bench, a grip position of 75.5
+# and an opening of 14 puts the jaws at 89.5, which passes a plate without catching it.
+_JAW_OPENING = 14.0
 # A plate holds the jaws open past the commanded grip; empty jaws settle on it.
 _PLATE_PRESENT_MARGIN = 2.0
 
@@ -900,8 +908,10 @@ class PreciseFlex:
     if joints[Axis.GRIPPER] < self.closed_gripper_position + plate_present_margin:
       raise PreciseFlexError(
         -1,
-        f"the gripper closed to {joints[Axis.GRIPPER]:.1f} with nothing in it; a resource "
-        f"would have held it above {self.closed_gripper_position + plate_present_margin:.1f}.",
+        f"the gripper closed to {joints[Axis.GRIPPER]:.1f} with nothing in it: a held resource "
+        f"keeps the jaws more than {plate_present_margin:.1f} above the grip position "
+        f"({self.closed_gripper_position:.1f}). If something IS in the jaws, that pair is wrong "
+        f"for this resource - the width of the face being gripped is what decides both.",
       )
 
   async def _release(self, jaw_opening: float) -> None:
@@ -910,9 +920,7 @@ class PreciseFlex:
     await self._open_to(joints[Axis.GRIPPER] + jaw_opening)
 
   async def _open_to(self, position: float) -> None:
-    """Open the jaws to a gripper-axis position, never past the axis ceiling."""
-    if self._gripper_soft_max is not None:
-      position = min(position, self._gripper_soft_max)
+    """Open the jaws to a gripper-axis position, held inside the axis limits."""
     await self.move_gripper_joint_position(position, force_sensing=False)
 
   def _assert_within_work_envelope(
@@ -2086,9 +2094,8 @@ class PreciseFlex:
     if outside:
       raise OutOfRangeOfMotionError(
         f"axis outside its soft limit after setup: {self._fmt_axes(outside)}. The controller rejects all "
-        f"commanded moves in this state. Recover with recover_axes_within_limits(), or freedrive "
-        f"the axis back into range manually (required for the wrist, or when an axis is far past "
-        f"its limit).",
+        f"commanded moves in this state. {self._recovery_advice(outside)} Freedrive the axis back into "
+        f"range by hand when it is far past its limit, and always for the wrist.",
         axes=outside,
       )
 
@@ -2107,6 +2114,23 @@ class PreciseFlex:
       if value is not None and not (lo <= value <= hi):
         outside[axis] = (value, (lo, hi))
     return outside
+
+  @staticmethod
+  def _recovery_advice(axes: Dict[Axis, tuple]) -> str:
+    """What actually gets these axes back inside their limits.
+
+    The rotary axes are absolute, so homing re-reads the same out-of-range value and
+    changes nothing. The gripper is the exception: it has no brake, so it drops out of
+    range whenever the motors lose power, and homing does re-seat it.
+    """
+    advice = ["Call recover_axes_within_limits() to drive them back into range."]
+    if Axis.GRIPPER in axes:
+      advice.append(
+        "Homing also re-seats the gripper: it has no brake, so it falls when the motors lose power."
+      )
+    if any(axis is not Axis.GRIPPER for axis in axes):
+      advice.append("Homing will not recover the other axes (the rotary axes are absolute).")
+    return " ".join(advice)
 
   @staticmethod
   def _fmt_axes(axes: Dict[Axis, tuple]) -> str:
@@ -2135,8 +2159,7 @@ class PreciseFlex:
     if out_of_range:
       raise OutOfRangeOfMotionError(
         f"axis out of range: {self._fmt_axes(out_of_range)}. The controller rejects every commanded "
-        f"move while an axis is out of range. Homing will not recover it (the rotary axes are "
-        f"absolute); call recover_axes_within_limits() to drive it back into range.",
+        f"move while an axis is out of range. {self._recovery_advice(out_of_range)}",
         axes=out_of_range,
       )
     for axis, (value, limit) in self._axes_outside_soft_limits(target).items():
@@ -2537,6 +2560,20 @@ class PreciseFlex:
   _gripper_soft_min: Optional[float] = None
   _gripper_soft_max: Optional[float] = None
 
+  def open_position(self, jaw_opening: Optional[float] = None) -> float:
+    """Where the jaws stand off the calibrated grip position, in gripper-axis units.
+
+    What an open with no width in it should reach for. The stops are a long move to no
+    purpose, and driving to one is what strands the axis outside its limits.
+
+    `jaw_opening` is how far off the grip position the caller wants the jaws. An
+    integration that tracks its own per-labware opening passes it here, so the arm
+    opens by the same number it picks with; `_JAW_OPENING` is only what this arm
+    answers when nobody says.
+    """
+    opening = _JAW_OPENING if jaw_opening is None else jaw_opening
+    return self.closed_gripper_position + opening
+
   @evented_operation(
     "precise_flex.move_gripper",
     lambda self, width, force_sensing=False: {
@@ -2582,7 +2619,7 @@ class PreciseFlex:
           f"axis range [{self._gripper_soft_min}, {self._gripper_soft_max}] - check "
           f"closed_gripper_position (currently {self.closed_gripper_position})."
         )
-      units = min(max(units, self._gripper_soft_min), self._gripper_soft_max)
+      units = self._within_gripper_limits(units)
     await self._wait_for_eom()
     if force_sensing:
       await self._set_grip_close_pos(units)
@@ -2609,6 +2646,7 @@ class PreciseFlex:
     This is the counterpart to :meth:`move_gripper` for integrations with
     taught joint-space routes. The caller owns the joint calibration.
     """
+    position = self._within_gripper_limits(position)
     await self._wait_for_eom()
     if force_sensing:
       await self._set_grip_close_pos(position)
@@ -2616,6 +2654,32 @@ class PreciseFlex:
     else:
       await self._set_grip_open_pos(position)
       await self.send_command("gripper 1")
+
+  def _within_gripper_limits(self, units: float) -> float:
+    """A gripper target held a little inside the axis' soft limits.
+
+    Both ends are adopted together off one discovered tuple, so the arm has either
+    read its limits or read neither, and before setup there is nothing to hold to.
+    """
+    if self._gripper_soft_min is None or self._gripper_soft_max is None:
+      return units
+    low = self._gripper_soft_min + _GRIPPER_LIMIT_HEADROOM
+    high = self._gripper_soft_max - _GRIPPER_LIMIT_HEADROOM
+    if low > high:
+      # A range narrower than the headroom at both ends: the middle is the safest target.
+      held = (low + high) / 2
+    else:
+      held = min(max(units, low), high)
+    if held != units:
+      logger.info(
+        "[PreciseFlex %s] gripper target %s held to %s, inside [%s, %s]",
+        self.io._host,
+        units,
+        held,
+        self._gripper_soft_min,
+        self._gripper_soft_max,
+      )
+    return held
 
   async def is_gripper_closed(self) -> bool:
     """(Single Gripper Only) Tests if the gripper is fully closed by checking the end-of-travel sensor.

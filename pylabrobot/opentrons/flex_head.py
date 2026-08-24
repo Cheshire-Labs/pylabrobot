@@ -2476,6 +2476,7 @@ class FlexHead8(_FlexHead):
     well: str,
     volume: float,
     flow_rate: Optional[float] = None,
+    liquid_height: Optional[float] = None,
   ) -> None:
     """Aspirate a single well with the currently mounted single tip.
 
@@ -2490,7 +2491,7 @@ class FlexHead8(_FlexHead):
     labware_id = await self.flex._ensure_labware_loaded(plate)
     staged_trackers = self._stage_container_aspirate(plate.get_item(well), volume)
     await self._pipette(
-      "aspirate", labware_id, well, volume, flow_rate, None, None, staged_trackers
+      "aspirate", labware_id, well, volume, flow_rate, None, liquid_height, staged_trackers
     )
 
   async def dispense_single(
@@ -2499,6 +2500,7 @@ class FlexHead8(_FlexHead):
     well: str,
     volume: float,
     flow_rate: Optional[float] = None,
+    liquid_height: Optional[float] = None,
   ) -> None:
     """Dispense to a single well with the currently mounted single tip."""
     self._warn_untested_hardware("dispense_single")
@@ -2508,7 +2510,7 @@ class FlexHead8(_FlexHead):
     labware_id = await self.flex._ensure_labware_loaded(plate)
     staged_trackers = self._stage_container_dispense(plate.get_item(well), volume)
     await self._pipette(
-      "dispense", labware_id, well, volume, flow_rate, None, None, staged_trackers
+      "dispense", labware_id, well, volume, flow_rate, None, liquid_height, staged_trackers
     )
 
   async def drop_single_tip(self, trash: Trash) -> None:

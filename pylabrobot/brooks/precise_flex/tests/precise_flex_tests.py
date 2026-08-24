@@ -12,6 +12,7 @@ from pylabrobot.brooks.precise_flex import (
   StationAccess,
   WorkEnvelope,
 )
+from pylabrobot.brooks.precise_flex.precise_flex import _GRIPPER_LIMIT_HEADROOM
 from pylabrobot.events import EventBus, PLREvent, event_context, use_event_bus
 from pylabrobot.resources import Coordinate, Rotation
 
@@ -36,7 +37,7 @@ def _make_arm(
 
   `wherej` answers with a pose because pick and place read the gripper axis back to tell a
   held plate from empty jaws; `gripper_units` is what those reads see. The default is the
-  bench proportion: the jaws are opened a step (10) off the grip position and a plate holds
+  bench proportion: the jaws are opened a step (14) off the grip position and a plate holds
   them a little (3) above it, inside that opening. A held position wider than the opening
   would describe a plate the fingers had already hit on the way in.
   """
@@ -54,6 +55,50 @@ def _make_arm(
 
   arm.send_command = AsyncMock(side_effect=reply)  # type: ignore[method-assign]
   return arm
+
+
+class TestGripperTargetsStayInsideTheirLimits(unittest.IsolatedAsyncioTestCase):
+  """The servo overshoots, so a target at an axis end lands outside it and the
+  controller then refuses every move until the arm is homed. No caller reaches the end."""
+
+  def setUp(self):
+    self.arm = _make_arm(closed_gripper_position=500.0)
+    self.arm._gripper_soft_min, self.arm._gripper_soft_max = 490.0, 560.0
+
+  def _sent_commands(self) -> list[str]:
+    return [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
+
+  async def test_a_width_at_the_axis_ceiling_is_held_short_of_it(self):
+    # 120 mm maps to 560.0, exactly the advertised ceiling.
+    await self.arm.move_gripper(width=120.0, force_sensing=False)
+    self.assertEqual(self._sent_commands()[-2:], ["GripOpenPos 559.5", "gripper 1"])
+
+  async def test_a_width_at_the_axis_floor_is_held_above_it(self):
+    await self.arm.move_gripper(width=50.0, force_sensing=True)
+    self.assertEqual(self._sent_commands()[-2:], ["GripClosePos 490.5", "gripper 2"])
+
+  async def test_a_joint_position_past_the_ceiling_is_clamped(self):
+    """The joint path took no bounds at all, so a live reading outside the limits
+    was passed straight back as a commanded target."""
+    await self.arm.move_gripper_joint_position(999.0, force_sensing=False)
+    self.assertEqual(self._sent_commands()[-2:], ["GripOpenPos 559.5", "gripper 1"])
+
+  async def test_a_joint_position_below_the_floor_is_clamped(self):
+    await self.arm.move_gripper_joint_position(0.0, force_sensing=False)
+    self.assertEqual(self._sent_commands()[-2:], ["GripOpenPos 490.5", "gripper 1"])
+
+  async def test_a_target_already_inside_the_limits_is_untouched(self):
+    await self.arm.move_gripper_joint_position(520.0, force_sensing=True)
+    self.assertEqual(self._sent_commands()[-2:], ["GripClosePos 520.0", "gripper 2"])
+
+  def test_the_default_open_stands_off_the_grip_rather_than_reaching_the_stop(self):
+    self.assertEqual(self.arm.open_position(), 514.0)
+    self.assertLess(self.arm.open_position(), self.arm._gripper_soft_max)
+
+  def test_a_caller_that_tracks_its_own_opening_gets_that_opening(self):
+    """An integration holding a per-labware opening has to be able to open by it, or the
+    jaws it picks with and the jaws an operator opens are two different numbers."""
+    self.assertEqual(self.arm.open_position(jaw_opening=18.0), 518.0)
 
 
 class TestPreciseFlex400Gripper(unittest.IsolatedAsyncioTestCase):
@@ -144,23 +189,25 @@ class TestGripperWidthsAdoptedFromSoftLimits(unittest.IsolatedAsyncioTestCase):
     after = self._sent()[len(before) :]
     self.assertEqual(before[0], after[0], "discovery moved what 80 mm means")
 
-  async def test_opening_to_the_advertised_max_reaches_the_axis_ceiling(self):
+  async def test_opening_to_the_advertised_max_stops_short_of_the_axis_ceiling(self):
     self._discover()
     await self.arm.move_gripper(self.arm.max_gripper_width, force_sensing=False)
-    self.assertIn(f"GripOpenPos {self.AXIS_MAX}", self._sent())
+    self.assertIn(f"GripOpenPos {self.AXIS_MAX - _GRIPPER_LIMIT_HEADROOM}", self._sent())
+    self.assertNotIn(f"GripOpenPos {self.AXIS_MAX}", self._sent())
 
-  async def test_closing_to_the_advertised_min_reaches_the_axis_floor(self):
+  async def test_closing_to_the_advertised_min_stops_above_the_axis_floor(self):
     self._discover()
     await self.arm.move_gripper(self.arm.min_gripper_width, force_sensing=True)
-    self.assertIn(f"GripClosePos {self.AXIS_MIN}", self._sent())
+    self.assertIn(f"GripClosePos {self.AXIS_MIN + _GRIPPER_LIMIT_HEADROOM}", self._sent())
+    self.assertNotIn(f"GripClosePos {self.AXIS_MIN}", self._sent())
 
-  async def test_an_advertised_end_survives_its_own_float_round_trip(self):
+  async def test_an_advertised_end_is_not_read_as_out_of_range(self):
     # Limits that are not halves: the reconverted ceiling lands a few ulps out, and the
-    # guard has to read that as float dust rather than as out of range.
+    # guard has to read that as float dust rather than as a width it must refuse.
     arm = _make_arm(closed_gripper_position=75.53)
     self._discover(arm=arm, limits=(70.3, 134.097))
     await arm.move_gripper(arm.max_gripper_width, force_sensing=False)
-    self.assertIn("GripOpenPos 134.097", self._sent(arm))
+    self.assertIn(f"GripOpenPos {134.097 - _GRIPPER_LIMIT_HEADROOM}", self._sent(arm))
 
   def test_the_soft_limits_stay_in_firmware_units(self):
     self._discover()
@@ -586,6 +633,41 @@ class TestPreciseFlex400AutoRecoverOnMove(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(self._cmds("wherej"), ["wherej"])  # exactly one position read
     self.assertEqual(len(self._cmds("moveJ")), 1)
 
+  async def test_a_stranded_gripper_is_told_that_homing_recovers_it(self):
+    """The gripper has no brake and drops out of range whenever power goes, which is how
+    it strands the arm. Telling the operator homing will not help sends them looking for
+    a recovery they do not need."""
+    self.arm._recover_out_of_range = False
+    self.arm._configuration = MagicMock(soft_limits={Axis.GRIPPER: (69.0, 134.0)})
+    self._stub("0 0.0 90.0 0.0 0.0")  # gripper at 0.0, below its floor
+    with self.assertRaises(OutOfRangeOfMotionError) as ctx:
+      await self.arm.move_to_joint_position({Axis.SHOULDER: 0.0})
+    self.assertIn("Homing also re-seats the gripper", str(ctx.exception))
+    self.assertNotIn("Homing will not recover", str(ctx.exception))
+
+  async def test_a_stranded_rotary_axis_is_told_homing_will_not_help(self):
+    """The rotary axes are absolute: homing re-reads the same out-of-range value."""
+    self.arm._recover_out_of_range = False
+    self._stub("0 93.5 90.0 0.0 0")
+    with self.assertRaises(OutOfRangeOfMotionError) as ctx:
+      await self.arm.move_to_joint_position({Axis.SHOULDER: 0.0})
+    self.assertIn("Homing will not recover the other axes", str(ctx.exception))
+    self.assertNotIn("re-seats the gripper", str(ctx.exception))
+
+  async def test_a_gripper_and_a_rotary_axis_out_together_are_told_about_both(self):
+    """Answering for the gripper alone tells an operator homing fixes this, and it does
+    not: the rotary axis is still out and still refuses every move afterwards."""
+    self.arm._recover_out_of_range = False
+    self.arm._configuration = MagicMock(
+      soft_limits={Axis.SHOULDER: (-93.0, 93.0), Axis.GRIPPER: (69.0, 134.0)}
+    )
+    self._stub("0 93.5 90.0 0.0 0.0")  # shoulder past its limit AND gripper below its floor
+    with self.assertRaises(OutOfRangeOfMotionError) as ctx:
+      await self.arm.move_to_joint_position({Axis.SHOULDER: 0.0})
+    message = str(ctx.exception)
+    self.assertIn("Homing also re-seats the gripper", message)
+    self.assertIn("Homing will not recover the other axes", message)
+
   async def test_move_to_location_is_also_guarded(self):
     """The Cartesian path funnels through the same guard: an out-of-range axis raises and sends no
     moveJ, like the joint path. The IK target is stubbed - it is the guard wiring, not IK, pinned
@@ -911,11 +993,13 @@ class TestPickAndPlaceAreComposedOfMoves(unittest.IsolatedAsyncioTestCase):
     self.assertIn("GripOpenPos 510.0", self._sent())  # closed_gripper_position 500 + 10
 
   async def test_the_jaws_never_open_past_the_axis_ceiling(self):
-    self.arm._gripper_soft_max = 505.0
+    # Both ends together: the arm adopts them from one discovered tuple, so a pose with
+    # only one of them set is a state it cannot be in.
+    self.arm._gripper_soft_min, self.arm._gripper_soft_max = 490.0, 505.0
     await self.arm.pick_up_at_location(
       _PAD_1, direction=2.03, resource_width=80.0, jaw_opening=40.0
     )
-    self.assertIn("GripOpenPos 505.0", self._sent())
+    self.assertIn(f"GripOpenPos {505.0 - _GRIPPER_LIMIT_HEADROOM}", self._sent())
 
   async def test_the_grip_commands_the_calibrated_position_not_the_axis_floor(self):
     # Commanding past a held plate holds a standing position error, which the controller
@@ -991,6 +1075,19 @@ class TestPickReportsEmptyJaws(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(PreciseFlexError) as caught:
       await arm.pick_up_at_location(_PAD_1, direction=2.03, resource_width=80.0)
     self.assertIn("nothing in it", str(caught.exception))
+
+  async def test_the_report_names_the_two_numbers_that_decided_it(self):
+    """A plate that IS in the jaws and reported as absent means the margin or the grip
+    position is wrong for that resource. Reporting only the threshold leaves nobody able
+    to tell which of the two to change."""
+    arm = self._arm(gripper_units=500.5)
+    with self.assertRaises(PreciseFlexError) as caught:
+      await arm.pick_up_at_location(
+        _PAD_1, direction=2.03, resource_width=80.0, plate_present_margin=4.0
+      )
+    message = str(caught.exception)
+    self.assertIn("more than 4.0", message)  # the margin it was given
+    self.assertIn("500.0", message)  # the grip position it closed to
 
   async def test_jaws_held_open_by_a_plate_are_a_successful_pick(self):
     arm = self._arm(gripper_units=503.0)
