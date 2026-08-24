@@ -31,6 +31,10 @@ _PORT_ATTEMPTS = 100
 _SERVER_START_SECONDS = 30.0
 """How long `setup()` waits for a server before saying it did not start."""
 
+_SERVER_STOP_SECONDS = 5.0
+"""How long `stop()` waits for a server thread to finish. Only so the port is
+usually free for the next `setup()`; a slower one just gets searched past."""
+
 
 async def _await_server_start(
   lock: threading.Lock, thread: threading.Thread, what: str, port: Callable[[], int]
@@ -680,11 +684,22 @@ class Visualizer:
 
     # -- websocket --
     if self.has_connection():
-      # send stop event to the browser
-      await self.send_command("stop", wait_for_response=False)
+      # Telling the browser is a courtesy; a tab that closed first must not stop
+      # the visualizer from shutting its own servers down.
+      try:
+        await self.send_command("stop", wait_for_response=False)
+      except websockets.exceptions.WebSocketException:
+        logger.debug("Browser was already gone when the visualizer stopped.")
 
-      # must be thread safe, because event loop is running in a separate thread
-      self.loop.call_soon_threadsafe(self.stop_.set_result, "done")
+    # The server waits on this future whether or not a browser ever connected, so
+    # resolving it only when one did left the server bound to its port for the
+    # rest of the process, with nothing left holding a handle to shut it down.
+    thread = self._t
+    if self._loop is not None and self._stop_ is not None and not self._stop_.done():
+      # must be thread safe, because the event loop runs in a separate thread
+      self._loop.call_soon_threadsafe(self._stop_.set_result, "done")
+    if thread is not None:
+      thread.join(timeout=_SERVER_STOP_SECONDS)
 
     # Clear all relevant attributes.
     self.received.clear()

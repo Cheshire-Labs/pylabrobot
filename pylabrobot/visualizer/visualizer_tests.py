@@ -105,17 +105,26 @@ class VisualizerSetupStopTests(unittest.IsolatedAsyncioTestCase):
     r = Resource(size_x=100, size_y=100, size_z=100, name="root")
     vis = Visualizer(r, open_browser=False)
 
+    served_on = []
+
     async def setup_stop_single():
       await vis.setup()
       self.assertIsNotNone(vis.loop)
       # wait for the server to start
       time.sleep(1)
+      served_on.append(vis.ws_port)
       await vis.stop()
       self.assertFalse(vis.has_connection())
 
     # setup and stop twice to ensure that everything is recycled correctly
     await setup_stop_single()
     await setup_stop_single()
+
+    self.assertEqual(
+      served_on[0],
+      served_on[1],
+      "stop() must free the port; a server left running pushes the next setup along one",
+    )
 
 
 class VisualizerServerTests(unittest.IsolatedAsyncioTestCase):
@@ -132,9 +141,11 @@ class VisualizerServerTests(unittest.IsolatedAsyncioTestCase):
     self.client = await websockets.connect(self.uri)
 
   async def asyncTearDown(self):
-    await super().asyncTearDown()
-    await self.vis.stop()
+    """Close the client first: stopping the visualizer closes its websocket
+    server, which waits for connections to drain before the port comes back."""
     await self.client.close()
+    await self.vis.stop()
+    await super().asyncTearDown()
 
   def test_get_index_html(self):
     """Test that the index.html file is returned."""
@@ -219,12 +230,17 @@ class VisualizerStartupFailureTests(unittest.IsolatedAsyncioTestCase):
       Resource(size_x=100, size_y=100, size_z=100, name="root"), open_browser=False
     )
 
-  @pytest.mark.timeout(20)
+  @pytest.mark.timeout(60)
   async def test_websocket_setup_gives_up_after_a_bounded_port_search(self):
+    """What ends a doomed search is the attempt count, not the clock, so the
+    deadline is put out of reach here rather than raced."""
     vis = self._visualizer()
-    with unittest.mock.patch.object(
-      websockets.asyncio.server, "serve", side_effect=OSError("address already in use")
-    ) as serve:
+    with (
+      unittest.mock.patch("pylabrobot.visualizer.visualizer._SERVER_START_SECONDS", 300.0),
+      unittest.mock.patch.object(
+        websockets.asyncio.server, "serve", side_effect=OSError("address already in use")
+      ) as serve,
+    ):
       with self.assertRaises(RuntimeError) as caught:
         await vis.setup()
 
@@ -252,12 +268,13 @@ class VisualizerStartupFailureTests(unittest.IsolatedAsyncioTestCase):
     self.assertIn("did not start", str(caught.exception))
     self.assertIn("2121", str(caught.exception))
 
-  @pytest.mark.timeout(20)
+  @pytest.mark.timeout(60)
   async def test_file_server_gives_up_after_a_bounded_port_search(self):
     """The file server had the same unbounded pair, one call further into
     setup(), so fixing only the websocket server left the hang reachable."""
     vis = self._visualizer()
     with (
+      unittest.mock.patch("pylabrobot.visualizer.visualizer._SERVER_START_SECONDS", 300.0),
       unittest.mock.patch.object(Visualizer, "_run_ws_server", unittest.mock.AsyncMock()),
       unittest.mock.patch.object(
         http.server, "HTTPServer", side_effect=OSError("address already in use")
