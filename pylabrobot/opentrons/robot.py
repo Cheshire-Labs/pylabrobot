@@ -132,19 +132,21 @@ class OpentronsRobot(abc.ABC):
     command_timeout: float = DEFAULT_COMMAND_TIMEOUT,
     status_poll_interval: float = DEFAULT_STATUS_POLL_INTERVAL,
   ) -> None:
-    """Args:
-    host: the robot's address.
-    port: the robot-server's port.
-    transport: wire transport to use instead of a real one, for offline runs.
-    request_timeout: how long one request/response may take, in seconds. Only a
-      transport this robot builds itself can carry it, so passing it alongside a
-      ``transport`` is refused; give that transport the budget instead. The
-      attribute reads ``None`` when a transport came in: the budget is that
-      transport's, and this object does not know it.
-    command_timeout: how long to poll a command before giving up, in seconds. A
-      command that names its own motion time gets ``max(command_timeout, motion +
-      COMMAND_POLL_HEADROOM)``.
-    status_poll_interval: delay between two command-status reads, in seconds.
+    """Build a robot handle. Nothing is contacted until ``setup()``.
+
+    Args:
+      host: the robot's address.
+      port: the robot-server's port.
+      transport: wire transport to use instead of a real one, for offline runs.
+      request_timeout: how long one request/response may take, in seconds. Only a
+        transport this robot builds itself can carry it, so passing it alongside a
+        ``transport`` is refused; give that transport the budget instead. The
+        attribute reads ``None`` when a transport came in: the budget is that
+        transport's, and this object does not know it.
+      command_timeout: how long to poll a command before giving up, in seconds. A
+        command that names its own motion time gets ``max(command_timeout, motion +
+        COMMAND_POLL_HEADROOM)``.
+      status_poll_interval: delay between two command-status reads, in seconds.
     """
     if transport is not None and request_timeout is not None:
       raise ValueError(
