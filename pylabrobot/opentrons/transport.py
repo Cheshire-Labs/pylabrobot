@@ -17,6 +17,7 @@ PLR-native checks layered on top of it — can run with no network.
 """
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import (
   Any,
@@ -25,6 +26,7 @@ from typing import (
   List,
   Optional,
   Protocol,
+  Set,
   Tuple,
   Union,
   cast,
@@ -182,6 +184,27 @@ class ReplayTransport:
     self._cr.done()
 
 
+@dataclass(frozen=True)
+class _RefusalStatus:
+  """The status half of a refusal, so callers can read ``error.response.status_code``."""
+
+  status_code: int
+
+
+class ChatterboxRefusal(RuntimeError):
+  """A non-2xx the offline fake raises where a robot would refuse.
+
+  Shaped like the real transport's ``httpx.HTTPStatusError`` -- the status is
+  read off ``.response.status_code`` -- so code that classifies a refusal by
+  status behaves identically offline. It cannot BE the httpx error: httpx is
+  an optional dependency and this transport is the no-network path.
+  """
+
+  def __init__(self, status_code: int, message: str) -> None:
+    super().__init__(f"{status_code}: {message}")
+    self.response = _RefusalStatus(status_code)
+
+
 class ChatterboxTransport:
   """Offline transport: logs commands, returns canned 'succeeded' responses.
 
@@ -293,6 +316,49 @@ class ChatterboxTransport:
     # refuse is refused here too. See _plunger_is_ready.
     self._plunger_primed: Dict[str, bool] = {}
     self._tip_volume: Dict[str, Optional[float]] = {}
+    # Run identity, so run liveness is real here: ids are unique per run, one
+    # run is current, and dead runs refuse commands like the robot-server does.
+    self._run_count = 0
+    self._current_run_id: Optional[str] = None
+    self._dead_run_ids: Set[str] = set()
+    self._deleted_run_ids: Set[str] = set()
+
+  def set_tip_detected(self, mount: str, detected: bool) -> None:
+    """Set one mount's simulated hardware tip-presence sensor directly.
+
+    For modeling what only a human can do: pulling a tip off the nozzle, or
+    seating one, outside any pickup/drop command this transport saw.
+    """
+    self._tip_detected[mount] = detected
+
+  def end_run_externally(self) -> None:
+    """Model an operator taking the robot at the instrument.
+
+    The touchscreen only works while no run is current, so any at-instrument
+    recovery stops our run first. Mirrors the robot-server faithfully: a STOP
+    leaves the run ``current: true`` (only a delete or a superseding run clears
+    that) while its ``status`` goes terminal, and commands POSTed to it are
+    refused like the server's 409 -- so liveness readers must key on status,
+    never on ``current`` alone. The simulated tip-presence sensors are
+    untouched: whether the operator also dropped the tips is the test's own
+    question (``set_tip_detected``).
+    """
+    if self._current_run_id is not None:
+      self._dead_run_ids.add(self._current_run_id)
+
+  def delete_run_externally(self) -> None:
+    """Model the operator not just stopping our run but clearing it away.
+
+    The other half of an at-instrument recovery: a deleted run is gone from
+    the robot entirely, so its record 404s rather than reading terminal, and
+    ``current`` is cleared. Liveness must read that as dead too, or the driver
+    wedges on a run nothing can revive.
+    """
+    if self._current_run_id is None:
+      return
+    self._deleted_run_ids.add(self._current_run_id)
+    self._dead_run_ids.add(self._current_run_id)
+    self._current_run_id = None
 
   async def setup(self) -> None:
     """No connection to open."""
@@ -334,7 +400,26 @@ class ChatterboxTransport:
         cmd_id, {"id": cmd_id, "commandType": "", "status": "succeeded", "result": {}}
       )
       return {"data": cmd_data}
+    if path.startswith("/runs/") and "/" not in path[len("/runs/") :]:  # one run's record
+      run_id = path.rsplit("/", 1)[-1]
+      if run_id in self._deleted_run_ids:
+        raise ChatterboxRefusal(404, f"run {run_id!r} was not found.")
+      return {
+        "data": {
+          "id": run_id,
+          "current": run_id == self._current_run_id,
+          "status": "stopped" if run_id in self._dead_run_ids else "running",
+        }
+      }
     return {"data": {}}
+
+  def _refuse_dead_run(self, path: str) -> None:
+    """Refuse a run-scoped request against a stopped run, like the robot-server's 409."""
+    run_id = path.split("/")[2]
+    if run_id in self._deleted_run_ids:
+      raise ChatterboxRefusal(404, f"run {run_id!r} was not found.")
+    if run_id in self._dead_run_ids:
+      raise ChatterboxRefusal(409, f"run {run_id!r} is not the current run.")
 
   def _plunger_is_ready(self, pipette_id: str) -> bool:
     """Whether the robot would let this pipette draw where it stands.
@@ -409,8 +494,15 @@ class ChatterboxTransport:
 
   async def post(self, path: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if path == "/runs":
-      return {"data": {"id": "chatterbox-run"}}
+      self._run_count += 1
+      run_id = f"chatterbox-run-{self._run_count}"
+      self._current_run_id = run_id
+      return {"data": {"id": run_id}}
+    if path.endswith("/actions"):  # run stop: terminal status, but still current
+      self._dead_run_ids.add(path.split("/")[2])
+      return {"data": {}}
     if path.endswith("/labware_definitions"):  # custom labware definition upload
+      self._refuse_dead_run(path)
       definition = (json or {}).get("data", {})
       self.labware_definitions.append(dict(definition))
       # The real robot-server answers with the stored definition's URI, which
@@ -426,6 +518,7 @@ class ChatterboxTransport:
       self._log("Chatterbox: defineLabware %s", uri)
       return {"data": {"definitionUri": uri}}
     if path.endswith("/commands"):
+      self._refuse_dead_run(path)
       data = (json or {}).get("data", {})
       ctype = data.get("commandType", "?")
       params = data.get("params", {})
@@ -470,7 +563,7 @@ class ChatterboxTransport:
           mount = self._pipette_id_to_mount.get(params.get("pipetteId"))
           if mount is not None:
             self._tip_detected[mount] = not self.simulate_failed_pickup
-        elif ctype in ("dropTip", "dropTipInPlace"):
+        elif ctype in ("dropTip", "dropTipInPlace", "unsafe/dropTipInPlace"):
           mount = self._pipette_id_to_mount.get(params.get("pipetteId"))
           if mount is not None:
             self._tip_detected[mount] = self.simulate_stuck_tip
@@ -520,6 +613,12 @@ class ChatterboxTransport:
     return {"data": {}}  # e.g. /actions
 
   async def delete(self, path: str) -> Dict[str, Any]:
+    if path.startswith("/runs/"):
+      run_id = path.rsplit("/", 1)[-1]
+      self._dead_run_ids.add(run_id)
+      self._deleted_run_ids.add(run_id)
+      if self._current_run_id == run_id:
+        self._current_run_id = None
     return {"data": {}}
 
   async def close(self) -> None:
