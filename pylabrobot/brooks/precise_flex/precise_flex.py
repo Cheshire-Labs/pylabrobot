@@ -1432,7 +1432,7 @@ class PreciseFlex:
       raise ValueError(f"finger_speed_pct must be between 0 and 100, got {finger_speed_pct}")
     await self.send_command(f"GraspData {plate_width} {finger_speed_pct} {grasp_force}")
 
-  async def _set_grip_detail(self):
+  async def _set_grip_detail(self) -> None:
     """Set the grip detail for the current location."""
     await self.send_command(f"StationType {self.location_index} 1 0 100 0 10")
 
@@ -1693,6 +1693,15 @@ class PreciseFlex:
     if self._configuration is None:
       raise RuntimeError("Configuration is not available until setup() has run.")
     return self._configuration
+
+  @property
+  def has_configuration(self) -> bool:
+    """Whether the controller's configuration was actually read.
+
+    Discovery is best-effort, so an arm can finish setup and still not know its own
+    limits. A caller that would rather adapt than be raised at asks this first.
+    """
+    return self._configuration is not None
 
   async def _request_configuration(self) -> "PreciseFlexConfiguration":
     """Read the controller's identity, axes, limits, kinematics, and envelope.
@@ -2460,8 +2469,11 @@ class PreciseFlex:
     """Move the PreciseFlex gripper jaws.
 
     ``force_sensing=False`` drives to the open position (``gripper 1``);
-    ``force_sensing=True`` drives to the close position with force feedback
-    (``gripper 2``), which may stop short of ``width`` on contact.
+    ``force_sensing=True`` drives to the close position (``gripper 2``). Both are
+    position moves: ``gripper 2`` limits the force it applies getting there, but it
+    does not stop the jaws where they meet something. Command the width a held
+    object wants, not a tighter one. Commanding past a held object leaves a standing
+    position error the controller reports as an overheating motor (-3104).
 
     Not interruptible: the ``gripper`` firmware command blocks the controller's command interpreter
     until the jaws finish (hardware-verified, like ``waitForEom``), so a user interrupt cannot halt it
@@ -2549,6 +2561,13 @@ class PreciseFlex:
         self._gripper_soft_max,
       )
     return held
+
+  @property
+  def gripper_joint_range(self) -> tuple[Optional[float], Optional[float]]:
+    """The gripper axis' soft limits in controller units, None at either end the arm
+    has not read. A jaw width in mm reaches these through ``closed_gripper_position``.
+    """
+    return self._gripper_soft_min, self._gripper_soft_max
 
   async def is_gripper_closed(self) -> bool:
     """(Single Gripper Only) Tests if the gripper is fully closed by checking the end-of-travel sensor.
@@ -2799,7 +2818,7 @@ class PreciseFlex:
         await self.move_rail(rail_position)
       await self._place_plate_c(cartesian_position=coords)
 
-  async def _pick_plate_j(self, joint_position: JointPose):
+  async def _pick_plate_j(self, joint_position: JointPose) -> None:
     """Pick a plate from the specified position using joint coordinates."""
     await self._set_joint_angles(self.location_index, joint_position)
     await self._set_grip_detail()
@@ -2810,7 +2829,7 @@ class PreciseFlex:
     if ret_code == "0":
       raise PreciseFlexError(-1, "the force-controlled gripper detected no plate present.")
 
-  async def _place_plate_j(self, joint_position: JointPose):
+  async def _place_plate_j(self, joint_position: JointPose) -> None:
     """Place a plate at the specified position using joint coordinates."""
     await self._set_joint_angles(self.location_index, joint_position)
     await self._set_grip_detail()
@@ -2819,12 +2838,12 @@ class PreciseFlex:
       f"placeplate {self.location_index} {horizontal_compliance_int} {self.horizontal_compliance_torque}"
     )
 
-  async def _pick_plate_c(self, cartesian_position: PreciseFlexCartesianPose):
+  async def _pick_plate_c(self, cartesian_position: PreciseFlexCartesianPose) -> None:
     """Pick a plate at a Cartesian position via IK + joint-space pickplate."""
     joints = await self._cart_to_joints(cartesian_position)
     await self._pick_plate_j(joints)
 
-  async def _place_plate_c(self, cartesian_position: PreciseFlexCartesianPose):
+  async def _place_plate_c(self, cartesian_position: PreciseFlexCartesianPose) -> None:
     """Place a plate at a Cartesian position via IK + joint-space placeplate."""
     joints = await self._cart_to_joints(cartesian_position)
     await self._place_plate_j(joints)

@@ -1,10 +1,21 @@
-"""Tests for how a command's completion is polled: what the deadline covers, and
-what the plunger headroom is allowed to raise."""
+"""Tests for the wait budgets a command is polled under: what the deadline covers,
+what the plunger headroom is allowed to raise, and that a caller can set both.
 
+A deployment whose own dispatcher aborts overrunning commands, or one on a slow
+link, has to be able to move these without editing the module. A budget fixed in
+here fires before the dispatcher's and takes the decision away from the operator.
+"""
+
+import time
 import unittest
 from typing import Any, Dict, Optional
 
 from pylabrobot.opentrons.flex import OpentronsFlex
+from pylabrobot.opentrons.robot import (
+  DEFAULT_COMMAND_TIMEOUT,
+  DEFAULT_STATUS_POLL_INTERVAL,
+  _command_budget,
+)
 from pylabrobot.opentrons.transport import ChatterboxTransport
 from pylabrobot.resources.opentrons.flex_deck import FlexDeck
 
@@ -36,8 +47,45 @@ class _ScriptedStatusTransport(ChatterboxTransport):
     }
 
 
-def _flex(transport: ChatterboxTransport) -> OpentronsFlex:
-  return OpentronsFlex(deck=FlexDeck(), host="localhost", transport=transport)
+def _flex(
+  transport: Optional[ChatterboxTransport] = None,
+  command_timeout: float = DEFAULT_COMMAND_TIMEOUT,
+  status_poll_interval: float = DEFAULT_STATUS_POLL_INTERVAL,
+) -> OpentronsFlex:
+  robot = OpentronsFlex(
+    deck=FlexDeck(),
+    host="localhost",
+    transport=transport or ChatterboxTransport(),
+    command_timeout=command_timeout,
+    status_poll_interval=status_poll_interval,
+  )
+  robot.run_id = "run-1"
+  return robot
+
+
+class CommandBudgetTests(unittest.TestCase):
+  """The budget arithmetic on its own, so a regression fails in milliseconds
+  instead of sitting out the wait it wrongly imposed."""
+
+  def test_a_command_with_no_plunger_travel_keeps_the_budget_it_was_given(self):
+    self.assertEqual(_command_budget(0.01, {}), 0.01)
+
+  def test_a_command_that_names_its_plunger_travel_gets_headroom_on_top(self):
+    # 1000 uL at 10 uL/s is 100 s of travel, which no fixed budget covers.
+    self.assertEqual(_command_budget(0.01, {"volume": 1000.0, "flowRate": 10.0}), 130.0)
+
+  def test_the_defaults_outlast_a_gripper_labware_move(self):
+    self.assertEqual(DEFAULT_COMMAND_TIMEOUT, 120.0)
+    self.assertEqual(DEFAULT_STATUS_POLL_INTERVAL, 0.2)
+
+  def test_a_budget_of_zero_or_less_is_refused(self):
+    """A zero poll interval spins the robot-server; a zero command budget never polls."""
+    with self.assertRaises(ValueError):
+      _flex(command_timeout=0.0)
+    with self.assertRaises(ValueError):
+      _flex(command_timeout=-5.0)
+    with self.assertRaises(ValueError):
+      _flex(status_poll_interval=0.0)
 
 
 class CommandPollTests(unittest.IsolatedAsyncioTestCase):
@@ -46,28 +94,55 @@ class CommandPollTests(unittest.IsolatedAsyncioTestCase):
     # move that already succeeded is worse than one extra read.
     transport = _ScriptedStatusTransport(succeed_after=1)
     robot = _flex(transport)
-    robot.run_id = "run-1"
 
     result = await robot._execute_command("home", {}, timeout=0.01)
 
     self.assertEqual(result["status"], "succeeded")
 
-  async def test_a_command_that_never_finishes_still_times_out(self):
+  async def test_a_command_with_no_budget_of_its_own_is_polled_for_the_robot_s(self):
+    """Without this the robot falls back to a fixed ceiling nothing above can raise,
+    and a home the robot-server takes minutes over is aborted mid-move."""
+    robot = _flex(_ScriptedStatusTransport(), command_timeout=0.05, status_poll_interval=0.01)
+
+    with self.assertRaises(RuntimeError) as caught:
+      await robot._execute_command("home", {})
+
+    self.assertIn("timed out after 0.05s", str(caught.exception))
+
+  async def test_a_caller_may_widen_one_command_past_the_robot_default(self):
+    robot = _flex(_ScriptedStatusTransport(), command_timeout=0.1, status_poll_interval=0.01)
+
+    started = time.monotonic()
+    with self.assertRaises(RuntimeError):
+      await robot.send_command("home", {}, timeout=0.6)
+
+    self.assertGreater(time.monotonic() - started, 0.5)
+
+  async def test_a_home_is_polled_for_the_robot_s_budget(self):
+    """``home`` used to send no budget at all, so it inherited whatever fixed default
+    the command path carried rather than the one the caller set."""
+    robot = _flex(_ScriptedStatusTransport(), command_timeout=0.05, status_poll_interval=0.01)
+
+    with self.assertRaises(RuntimeError) as caught:
+      await robot.home()
+
+    self.assertIn("timed out after 0.05s", str(caught.exception))
+
+  async def test_a_home_may_carry_a_budget_of_its_own(self):
+    """A full gantry-and-pipette home outlasts the other commands, so widening it
+    must not mean widening every command."""
+    robot = _flex(_ScriptedStatusTransport(), command_timeout=0.05, status_poll_interval=0.01)
+
+    with self.assertRaises(RuntimeError) as caught:
+      await robot.home(timeout=0.2)
+
+    self.assertIn("timed out after 0.2s", str(caught.exception))
+
+  async def test_the_poll_interval_paces_the_status_reads(self):
     transport = _ScriptedStatusTransport()
-    robot = _flex(transport)
-    robot.run_id = "run-1"
+    robot = _flex(transport, command_timeout=0.4, status_poll_interval=0.01)
 
     with self.assertRaises(RuntimeError):
-      await robot._execute_command("home", {}, timeout=0.01)
+      await robot.send_command("home", {})
 
-  async def test_the_plunger_headroom_is_not_a_floor_under_a_command_with_no_motion(self):
-    # A command that names no plunger travel must be allowed a budget below the
-    # headroom, or no caller could ever set a short one.
-    transport = _ScriptedStatusTransport()
-    robot = _flex(transport)
-    robot.run_id = "run-1"
-
-    with self.assertRaises(RuntimeError):
-      await robot._execute_command("home", {}, timeout=0.01)
-
-    self.assertLess(transport.status_reads, 10, "the budget was raised to the headroom")
+    self.assertGreater(transport.status_reads, 10)

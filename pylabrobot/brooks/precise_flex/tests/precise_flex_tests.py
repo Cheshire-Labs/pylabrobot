@@ -45,6 +45,52 @@ def _make_arm(closed_gripper_position: float = 500.0) -> PreciseFlex:
   return arm
 
 
+class TestGripperTargetsStayInsideTheirLimits(unittest.IsolatedAsyncioTestCase):
+  """Commanding past the end of the gripper axis strands the arm: the controller then
+  refuses every move, gripper or not, until it is homed. No caller reaches the end."""
+
+  def setUp(self):
+    self.arm = _make_arm(closed_gripper_position=500.0)
+    self.arm._gripper_soft_min, self.arm._gripper_soft_max = 490.0, 560.0
+
+  def _sent_commands(self) -> list[str]:
+    return [c.args[0] for c in mocked(self.arm.send_command).call_args_list]
+
+  async def test_the_jaws_never_open_past_the_axis_ceiling(self):
+    """Held short of the stop: the servo overshoots, and a target at the end lands
+    outside it, after which the controller refuses every move until the arm homes."""
+    await self.arm.move_gripper_joint_position(999.0, force_sensing=False)
+    ceiling = 560.0 - _GRIPPER_LIMIT_HEADROOM
+    self.assertEqual(self._sent_commands()[-2:], [f"GripOpenPos {ceiling}", "gripper 1"])
+
+  async def test_the_jaws_never_close_below_the_axis_floor(self):
+    await self.arm.move_gripper_joint_position(0.0, force_sensing=True)
+    floor = 490.0 + _GRIPPER_LIMIT_HEADROOM
+    self.assertEqual(self._sent_commands()[-2:], [f"GripClosePos {floor}", "gripper 2"])
+
+  async def test_a_target_already_inside_the_limits_is_commanded_as_asked(self):
+    await self.arm.move_gripper_joint_position(520.0, force_sensing=True)
+    self.assertEqual(self._sent_commands()[-2:], ["GripClosePos 520.0", "gripper 2"])
+
+  def test_the_axis_limits_are_readable_without_reaching_into_the_arm(self):
+    """A composition above the driver has to be able to see the ceiling it must not
+    compute a target past, and it cannot read private state to find it."""
+    self.assertEqual(self.arm.gripper_joint_range, (490.0, 560.0))
+
+  def test_an_arm_that_has_read_no_limits_reports_neither_end(self):
+    self.assertEqual(_make_arm().gripper_joint_range, (None, None))
+
+  async def test_an_arm_that_has_read_no_limits_commands_what_it_was_asked_for(self):
+    """Before discovery there is no ceiling to hold a target under, and inventing one
+    would refuse widths the fitted gripper reaches."""
+    arm = _make_arm(closed_gripper_position=500.0)
+
+    await arm.move_gripper_joint_position(999.0, force_sensing=False)
+
+    sent = [c.args[0] for c in mocked(arm.send_command).call_args_list]
+    self.assertEqual(sent[-2:], ["GripOpenPos 999.0", "gripper 1"])
+
+
 class TestPreciseFlex400Gripper(unittest.IsolatedAsyncioTestCase):
   def setUp(self):
     # closed_gripper_position=500 â‡’ min_gripper_width(60mm) maps to 500 units.
@@ -645,6 +691,17 @@ class TestPreciseFlexLifecycle(unittest.IsolatedAsyncioTestCase):
     self.assertNotIn("hp 1", self._sent())
     self._assert_moved_nothing()
 
+  async def test_an_arm_whose_discovery_failed_says_it_has_no_configuration(self):
+    """Discovery is best-effort, so bring-up succeeding is not proof the arm knows its
+    own limits, and a caller above has no other way to tell the two apart."""
+    self.arm._request_configuration = AsyncMock(side_effect=RuntimeError("no controller"))
+
+    await self.arm.initialize()
+
+    self.assertFalse(self.arm.has_configuration)
+    with self.assertRaises(RuntimeError):
+      self.arm.configuration
+
   async def test_initialize_takes_control_without_moving(self):
     self.arm._request_configuration = AsyncMock(side_effect=RuntimeError("no controller"))
     await self.arm.initialize()
@@ -670,6 +727,7 @@ class TestPreciseFlexLifecycle(unittest.IsolatedAsyncioTestCase):
     await self.arm.initialize()
 
     self.arm._adopt_configuration.assert_called_once_with(discovered)
+    self.assertTrue(self.arm.has_configuration)
 
   async def test_initialize_falls_back_to_defaults_when_discovery_fails(self):
     self.arm._request_configuration = AsyncMock(side_effect=RuntimeError("no controller"))
