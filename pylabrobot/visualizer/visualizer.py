@@ -631,7 +631,7 @@ class Visualizer:
           else:
             return super().do_GET()
 
-      for _ in range(_PORT_ATTEMPTS):
+      for attempt in range(_PORT_ATTEMPTS):
         try:
           self._httpd = http.server.HTTPServer(
             (self.host, self.fs_port),
@@ -639,13 +639,14 @@ class Visualizer:
           )
           break
         except OSError:
+          # Advance only when there is another attempt left, so the port this
+          # ends on is the last one actually tried and not one past it.
+          if attempt == _PORT_ATTEMPTS - 1:
+            return
           self.fs_port += 1
-      else:
-        return
 
       print(
-        f"File server started at http://{self.host}:{self.fs_port} . "
-        "Open this URL in your browser."
+        f"File server started at http://{self.host}:{self.fs_port} . Open this URL in your browser."
       )
       lock.release()
       self.httpd.serve_forever()
@@ -674,9 +675,12 @@ class Visualizer:
     """
 
     # -- file server --
-    # Stop the file server.
-    self.httpd.shutdown()
-    self.httpd.server_close()
+    # setup() starts the websocket server first, so a run that failed on the file
+    # server still has one to shut down. Reading self.httpd here would raise and
+    # strand it for the rest of the process.
+    if self._httpd is not None:
+      self._httpd.shutdown()
+      self._httpd.server_close()
 
     # Clear all relevant attributes.
     self._httpd = None
