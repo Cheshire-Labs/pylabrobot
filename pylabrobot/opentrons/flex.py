@@ -165,6 +165,15 @@ class OpentronsFlex(OpentronsRobot):
     yield
     self._current_labware_id = labware_id
 
+  def forget_pipetting_position(self) -> None:
+    """Stop believing the gantry is still over its last labware.
+
+    For when something OTHER than a move by this object put it somewhere else:
+    an operator recovering the robot by hand, an e-stop. The arc guard has to
+    read that as unknown, or the next pipetting move skips its traversal arc.
+    """
+    self._current_labware_id = None
+
   def attach_deck(self, deck: FlexDeck) -> None:
     """Swap in a new deck, so a caller can describe the deck without rebuilding
     the robot (and losing the link and the run with it).

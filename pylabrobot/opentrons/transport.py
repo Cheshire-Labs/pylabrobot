@@ -17,6 +17,7 @@ PLR-native checks layered on top of it — can run with no network.
 """
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import (
   Any,
@@ -183,6 +184,27 @@ class ReplayTransport:
     self._cr.done()
 
 
+@dataclass(frozen=True)
+class _RefusalStatus:
+  """The status half of a refusal, so callers can read ``error.response.status_code``."""
+
+  status_code: int
+
+
+class ChatterboxRefusal(RuntimeError):
+  """A non-2xx the offline fake raises where a robot would refuse.
+
+  Shaped like the real transport's ``httpx.HTTPStatusError`` -- the status is
+  read off ``.response.status_code`` -- so code that classifies a refusal by
+  status behaves identically offline. It cannot BE the httpx error: httpx is
+  an optional dependency and this transport is the no-network path.
+  """
+
+  def __init__(self, status_code: int, message: str) -> None:
+    super().__init__(f"{status_code}: {message}")
+    self.response = _RefusalStatus(status_code)
+
+
 class ChatterboxTransport:
   """Offline transport: logs commands, returns canned 'succeeded' responses.
 
@@ -299,6 +321,7 @@ class ChatterboxTransport:
     self._run_count = 0
     self._current_run_id: Optional[str] = None
     self._dead_run_ids: Set[str] = set()
+    self._deleted_run_ids: Set[str] = set()
 
   def set_tip_detected(self, mount: str, detected: bool) -> None:
     """Set one mount's simulated hardware tip-presence sensor directly.
@@ -322,6 +345,20 @@ class ChatterboxTransport:
     """
     if self._current_run_id is not None:
       self._dead_run_ids.add(self._current_run_id)
+
+  def delete_run_externally(self) -> None:
+    """Model the operator not just stopping our run but clearing it away.
+
+    The other half of an at-instrument recovery: a deleted run is gone from
+    the robot entirely, so its record 404s rather than reading terminal, and
+    ``current`` is cleared. Liveness must read that as dead too, or the driver
+    wedges on a run nothing can revive.
+    """
+    if self._current_run_id is None:
+      return
+    self._deleted_run_ids.add(self._current_run_id)
+    self._dead_run_ids.add(self._current_run_id)
+    self._current_run_id = None
 
   async def setup(self) -> None:
     """No connection to open."""
@@ -365,6 +402,8 @@ class ChatterboxTransport:
       return {"data": cmd_data}
     if path.startswith("/runs/") and "/" not in path[len("/runs/") :]:  # one run's record
       run_id = path.rsplit("/", 1)[-1]
+      if run_id in self._deleted_run_ids:
+        raise ChatterboxRefusal(404, f"run {run_id!r} was not found.")
       return {
         "data": {
           "id": run_id,
@@ -377,8 +416,10 @@ class ChatterboxTransport:
   def _refuse_dead_run(self, path: str) -> None:
     """Refuse a run-scoped request against a stopped run, like the robot-server's 409."""
     run_id = path.split("/")[2]
+    if run_id in self._deleted_run_ids:
+      raise ChatterboxRefusal(404, f"run {run_id!r} was not found.")
     if run_id in self._dead_run_ids:
-      raise RuntimeError(f"409: run {run_id!r} is not the current run.")
+      raise ChatterboxRefusal(409, f"run {run_id!r} is not the current run.")
 
   def _plunger_is_ready(self, pipette_id: str) -> bool:
     """Whether the robot would let this pipette draw where it stands.
@@ -575,6 +616,7 @@ class ChatterboxTransport:
     if path.startswith("/runs/"):
       run_id = path.rsplit("/", 1)[-1]
       self._dead_run_ids.add(run_id)
+      self._deleted_run_ids.add(run_id)
       if self._current_run_id == run_id:
         self._current_run_id = None
     return {"data": {}}

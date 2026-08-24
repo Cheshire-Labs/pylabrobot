@@ -22,9 +22,21 @@ DEFAULT_COMMAND_TIMEOUT = 120.0
 # Delay between two reads of a running command's status.
 DEFAULT_STATUS_POLL_INTERVAL = 0.2
 
-# Run statuses that accept no further commands. "stop-requested" is included:
-# a run on its way down refuses new work the same as one already stopped.
-_TERMINAL_RUN_STATUSES = frozenset({"stopped", "failed", "succeeded", "stop-requested"})
+# Run statuses that accept no further commands: a run on its way down refuses
+# new work the same as one already stopped.
+_TERMINAL_RUN_STATUSES = frozenset(
+  {"stopped", "failed", "succeeded", "stop-requested", "finishing"}
+)
+
+
+def _robot_says_run_is_gone(error: Exception) -> bool:
+  """Whether a wire failure was the robot answering 404 for the run.
+
+  Read off the status rather than the exception type: the real transport
+  raises httpx's error and the offline fake raises its own, and both carry the
+  status the same way.
+  """
+  return getattr(getattr(error, "response", None), "status_code", None) == 404
 
 
 def _plunger_seconds(params: Dict[str, Any]) -> float:
@@ -332,18 +344,24 @@ class OpentronsRobot(abc.ABC):
   async def run_is_live(self) -> bool:
     """Whether the run this object opened still accepts commands.
 
-    One ``GET /runs/{id}``, no motion. ``False`` with no run open, and ``False``
-    when the robot reports the run superseded or in a terminal status. BOTH
-    reads matter: the robot-server clears ``current`` only when a run is
+    One ``GET /runs/{id}``, no motion. ``False`` with no run open, ``False``
+    when the robot no longer has the run at all (404: it was deleted), and
+    ``False`` when the robot reports it superseded or in a terminal status.
+    All three matter: the robot-server clears ``current`` only when a run is
     deleted or another run supersedes it -- an operator who merely STOPS our
     run at the touchscreen leaves it stopped-but-still-current, so ``current``
-    alone would read a dead run as live. A stopped run still answers this read
-    (the robot keeps the record); wire failures propagate rather than being
-    read as dead, so an unreachable robot is not mistaken for a taken-over one.
+    alone would read a dead run as live. Any OTHER wire failure propagates
+    rather than being read as dead, so an unreachable robot is not mistaken
+    for a taken-over one.
     """
     if self.run_id is None:
       return False
-    run = (await self._get(f"/runs/{self.run_id}")).get("data", {})
+    try:
+      run = (await self._get(f"/runs/{self.run_id}")).get("data", {})
+    except Exception as error:
+      if _robot_says_run_is_gone(error):
+        return False
+      raise
     if not run.get("current", False):
       return False
     return run.get("status") not in _TERMINAL_RUN_STATUSES

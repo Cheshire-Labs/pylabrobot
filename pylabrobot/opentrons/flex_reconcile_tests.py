@@ -13,14 +13,15 @@ import asyncio
 import unittest
 from typing import Tuple
 
-from pylabrobot.opentrons.flex import OpentronsFlex
+from pylabrobot.opentrons import OpentronsFlex, OpentronsRunNotCurrentError
 from pylabrobot.opentrons.flex_head import (
+  _UNKNOWN_TIP_HANG_LARGE,
+  _UNKNOWN_TIP_HANG_SMALL,
   RECONCILE_CLEARED_LOST_TIPS,
   RECONCILE_IN_SYNC,
   RECONCILE_UNTRACKED_TIP,
   FlexHead8,
 )
-from pylabrobot.opentrons.robot import OpentronsRunNotCurrentError
 from pylabrobot.opentrons.transport import ChatterboxTransport
 from pylabrobot.resources import set_tip_tracking, set_volume_tracking
 from pylabrobot.resources.opentrons.flex_deck import FlexDeck
@@ -69,6 +70,45 @@ class TestRunLiveness(unittest.TestCase):
       run = asyncio.run(transport.get(f"/runs/{flex.run_id}"))["data"]
       self.assertTrue(run["current"])
       self.assertEqual(run["status"], "stopped")
+      self.assertFalse(asyncio.run(flex.run_is_live()))
+    finally:
+      asyncio.run(flex.disconnect())
+
+  def test_a_deleted_run_reads_not_current_rather_than_raising(self):
+    """The other half of an at-instrument recovery: the run is cleared away,
+    not just stopped, so its record 404s. A read that let that 404 escape
+    would wedge every later initialize on a run nothing can revive."""
+    flex, transport, _ = _flex_head8()
+    try:
+      transport.delete_run_externally()
+      self.assertFalse(asyncio.run(flex.run_is_live()))
+    finally:
+      asyncio.run(flex.disconnect())
+
+  def test_a_command_against_a_deleted_run_raises_the_typed_error(self):
+    flex, transport, head = _flex_head8()
+    try:
+      transport.delete_run_externally()
+      with self.assertRaises(OpentronsRunNotCurrentError):
+        asyncio.run(head.get_tip_presence())
+    finally:
+      asyncio.run(flex.disconnect())
+
+  def test_a_run_still_finishing_reads_dead(self):
+    """Every status that refuses new work counts, not just the settled ones:
+    a run on its way down accepts nothing while it winds up."""
+
+    class _FinishingTransport(ChatterboxTransport):
+      async def get(self, path):
+        data = await super().get(path)
+        if path.startswith("/runs/") and "/" not in path[len("/runs/") :]:
+          data["data"]["status"] = "finishing"
+        return data
+
+    transport = _FinishingTransport(pipettes=[("p50_multi_flex", 8, 1.0, 50.0, "left")])
+    flex = OpentronsFlex(deck=FlexDeck(), host="localhost", transport=transport)
+    asyncio.run(flex.setup())
+    try:
       self.assertFalse(asyncio.run(flex.run_is_live()))
     finally:
       asyncio.run(flex.disconnect())
@@ -156,6 +196,36 @@ class TestTipReconcile(unittest.TestCase):
     finally:
       asyncio.run(flex.stop())
 
+  def test_holding_tips_the_sensor_confirms_reconciles_to_in_sync(self):
+    """The other agreeing state: the model holds a column and the sensor sees it."""
+    flex, _, head = _flex_head8()
+    try:
+      rack = flex_96_tiprack_50ul(name="rack")
+      flex.deck.assign_child_at_slot(rack, "C1")
+      asyncio.run(head.pick_up_tips(rack, column=0))
+
+      self.assertEqual(asyncio.run(head.reconcile_tips_with_hardware()), RECONCILE_IN_SYNC)
+      self.assertTrue(all(t is not None for t in head.get_mounted_tips()))
+    finally:
+      asyncio.run(flex.stop())
+
+  def test_clearing_lost_tips_makes_the_next_move_arc(self):
+    """Whatever took the tips moved the gantry, so the head must stop believing
+    it is still over the labware it last addressed."""
+    flex, transport, head = _flex_head8()
+    try:
+      rack = flex_96_tiprack_50ul(name="rack")
+      flex.deck.assign_child_at_slot(rack, "C1")
+      asyncio.run(head.pick_up_tips(rack, column=0))
+      self.assertIsNotNone(flex._current_labware_id)
+      transport.set_tip_detected("left", False)
+
+      asyncio.run(head.reconcile_tips_with_hardware())
+
+      self.assertIsNone(flex._current_labware_id)
+    finally:
+      asyncio.run(flex.stop())
+
   def test_sensor_present_while_empty_reports_and_changes_nothing(self):
     flex, transport, head = _flex_head8()
     try:
@@ -185,9 +255,34 @@ class TestUnsafeDiscardTips(unittest.TestCase):
       move_cmd = next(
         c for c in transport.commands if c["commandType"] == "moveToAddressableAreaForDropTip"
       )
-      self.assertGreater(move_cmd["params"]["minimumZHeight"], plain_height)
+      # A 50 uL tip hangs ~48 mm below the nozzle the engine plans travel for.
+      self.assertAlmostEqual(
+        move_cmd["params"]["minimumZHeight"], plain_height + _UNKNOWN_TIP_HANG_SMALL
+      )
       self.assertIn("unsafe/dropTipInPlace", [c["commandType"] for c in transport.commands])
       self.assertTrue(all(t is None for t in head.get_mounted_tips()))
+    finally:
+      asyncio.run(flex.stop())
+
+  def test_a_large_tip_pipette_pads_travel_by_the_longer_hang(self):
+    """The pad is the LONGEST tip the pipette mounts, so a p1000 clears more."""
+    transport = ChatterboxTransport(pipettes=[("p1000_multi_flex", 8, 1.0, 1000.0, "left")])
+    flex = OpentronsFlex(deck=FlexDeck(), host="localhost", transport=transport)
+    asyncio.run(flex.setup())
+    head = flex.left
+    assert head is not None
+    try:
+      trash = flex.deck.get_trash_area()
+      plain_height = head._traversal_height()
+
+      asyncio.run(head.unsafe_discard_tips(trash))
+
+      move_cmd = next(
+        c for c in transport.commands if c["commandType"] == "moveToAddressableAreaForDropTip"
+      )
+      self.assertAlmostEqual(
+        move_cmd["params"]["minimumZHeight"], plain_height + _UNKNOWN_TIP_HANG_LARGE
+      )
     finally:
       asyncio.run(flex.stop())
 

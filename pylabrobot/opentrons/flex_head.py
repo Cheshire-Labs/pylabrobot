@@ -68,9 +68,7 @@ logger = logging.getLogger(__name__)
 
 # What reconcile_tips_with_hardware can report; the matching RECONCILE_*
 # constants live with the other module constants below.
-TipReconcileOutcome = Literal[
-  "in_sync", "cleared_lost_tips", "untracked_tip_present", "unverified"
-]
+TipReconcileOutcome = Literal["in_sync", "cleared_lost_tips", "untracked_tip_present", "unverified"]
 
 
 class _FlexHead:
@@ -379,29 +377,36 @@ class _FlexHead:
       )
     return f"movableTrash{slot}"
 
+  async def _move_over_trash(self, trash: Trash, extra_z: float = 0.0) -> None:
+    """Travel to the trash's drop position, arcing over everything on the deck.
+
+    ``minimumZHeight`` is the computed traversal plane, so the travel clears
+    every labware on the deck. Without it the engine picks its own arc height
+    from only the labware it has been told is loaded, which can travel too low
+    and clip a rack the robot was never told about. ``extra_z`` raises the
+    plane further for a tip the engine is not planning around (see
+    ``unsafe_discard_tips``).
+    """
+    await self._execute(
+      "moveToAddressableAreaForDropTip",
+      {
+        "pipetteId": self.pipette_id,
+        "addressableAreaName": self._trash_addressable_area(trash),
+        "alternateDropLocation": True,
+        "minimumZHeight": self._traversal_height() + extra_z,
+      },
+    )
+
   async def _execute_trash_drop(self, trash: Trash) -> None:
     """Send the two-command addressable-area trash-drop sequence.
 
     Shared by every ``discard_tips``/``drop_single_tip`` variant. No tracker
     involvement (trash has none); callers update ``_channel_tips`` and call
     ``_confirm_tips_cleared()`` themselves after this returns.
-
-    ``minimumZHeight`` is set to the computed traversal plane so the travel to
-    the trash arcs over every labware on the deck. Without it the engine picks
-    its own arc height from only the labware it has been told is loaded, which
-    can travel too low and clip a rack the robot was never told about.
     """
     # The trash is not a slot's labware, so the next pipetting move arcs high.
     async with self.flex._moving_to(None):
-      await self._execute(
-        "moveToAddressableAreaForDropTip",
-        {
-          "pipetteId": self.pipette_id,
-          "addressableAreaName": self._trash_addressable_area(trash),
-          "alternateDropLocation": True,
-          "minimumZHeight": self._traversal_height(),
-        },
-      )
+      await self._move_over_trash(trash)
       await self._execute("dropTipInPlace", {"pipetteId": self.pipette_id})
 
   # --- Fine-pipetting shared helpers ---
@@ -974,6 +979,9 @@ class _FlexHead:
       return RECONCILE_UNTRACKED_TIP
     if not sensor and tracked > 0:
       self._channel_tips = [None] * self.channels
+      # Whatever moved those tips moved the gantry too: the next pipetting
+      # move must arc rather than assume it is still over its last labware.
+      self.flex.forget_pipetting_position()
       return RECONCILE_CLEARED_LOST_TIPS
     return RECONCILE_IN_SYNC
 
@@ -1009,10 +1017,12 @@ class _FlexHead:
     self._channel_tips = [None] * self.channels
 
   async def unsafe_discard_tips(self, trash: Trash) -> None:
-    """Trash whatever the hardware says is on the nozzle, trusting the sensor over the model.
+    """Trash a tip the run does not know about. Reads no sensor of its own.
 
-    The recovery counterpart to ``discard_tips`` for a tip the run does not
-    know about: after an external recovery the fresh run believes no tip is
+    The recovery counterpart to ``discard_tips``, for the state
+    ``reconcile_tips_with_hardware`` reports as ``untracked_tip_present``: the
+    caller has already established a tip is seated, so this only has to get
+    rid of it. After an external recovery the fresh run believes no tip is
     attached, so the ordinary drop is refused and, worse, the engine plans
     travel for the bare NOZZLE while the physical tip bottom hangs up to a
     large tip's length lower. Travel is therefore padded by the longest tip
@@ -1022,18 +1032,10 @@ class _FlexHead:
     """
     self._warn_untested_hardware("unsafe_discard_tips")
     hang = _UNKNOWN_TIP_HANG_LARGE if self.max_volume >= 1000 else _UNKNOWN_TIP_HANG_SMALL
-    await self._execute(
-      "moveToAddressableAreaForDropTip",
-      {
-        "pipetteId": self.pipette_id,
-        "addressableAreaName": self._trash_addressable_area(trash),
-        "alternateDropLocation": True,
-        "minimumZHeight": self._traversal_height() + hang,
-      },
-    )
-    await self._execute("unsafe/dropTipInPlace", {"pipetteId": self.pipette_id})
+    async with self.flex._moving_to(None):
+      await self._move_over_trash(trash, extra_z=hang)
+      await self._execute("unsafe/dropTipInPlace", {"pipetteId": self.pipette_id})
     self._channel_tips = [None] * self.channels
-    self._current_labware_id = None
 
   async def unsafe_blow_out_in_place(self, flow_rate: float) -> None:
     """Blow out where the head is, skipping the engine's own checks.
