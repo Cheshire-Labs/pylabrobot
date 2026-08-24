@@ -97,10 +97,6 @@ class _FlexHead:
     self.max_volume = max_volume
     self._channel_tips: List[Optional[Tip]] = [None] * channels
     self._untested_hardware_warned: Set[str] = set()
-    # The labware id the pipette last pipetted over, or None when its position is
-    # unknown (start of run, after a jog or a trash drop). Used to arc high only
-    # when a pipetting move crosses to a different slot -- see _travel_guard.
-    self._current_labware_id: Optional[str] = None
 
   async def _travel_guard(self, params: Dict[str, Any]) -> None:
     """Arc to a new slot's well at the safe travel plane before pipetting there.
@@ -118,19 +114,29 @@ class _FlexHead:
     well_name = params.get("wellName")
     if not isinstance(labware_id, str) or not isinstance(well_name, str):
       return
-    if labware_id == self._current_labware_id:
+    if labware_id == self.flex._current_labware_id:
       return
-    await self._execute(
-      "moveToWell",
-      {
-        "pipetteId": self.pipette_id,
-        "labwareId": labware_id,
-        "wellName": well_name,
-        "wellLocation": {"origin": "top", "offset": {"x": 0, "y": 0, "z": 0}},
-        "minimumZHeight": self._traversal_height(),
-      },
-    )
-    self._current_labware_id = labware_id
+    async with self.flex._moving_to(labware_id):
+      await self._execute(
+        "moveToWell",
+        {
+          "pipetteId": self.pipette_id,
+          "labwareId": labware_id,
+          "wellName": well_name,
+          "wellLocation": {"origin": "top", "offset": {"x": 0, "y": 0, "z": 0}},
+          "minimumZHeight": self._traversal_height(),
+        },
+      )
+
+  async def _execute_at_well(self, command_type: str, params: Dict[str, Any]) -> None:
+    """Send a command that names a well, arcing high first when it crosses slots.
+
+    ``touchTip`` names a well but carries no ``minimumZHeight`` of its own, so
+    the crossing is only safe if the guard puts an arc in front of it. The
+    probes need the same guard but send through ``_execute_draw``.
+    """
+    await self._travel_guard(params)
+    await self._execute(command_type, params)
 
   def _warn_untested_hardware(self, op: str) -> None:
     """Log a one-time notice when an op has no real-hardware verification.
@@ -377,18 +383,18 @@ class _FlexHead:
     its own arc height from only the labware it has been told is loaded, which
     can travel too low and clip a rack the robot was never told about.
     """
-    await self._execute(
-      "moveToAddressableAreaForDropTip",
-      {
-        "pipetteId": self.pipette_id,
-        "addressableAreaName": self._trash_addressable_area(trash),
-        "alternateDropLocation": True,
-        "minimumZHeight": self._traversal_height(),
-      },
-    )
-    await self._execute("dropTipInPlace", {"pipetteId": self.pipette_id})
-    # Now over the trash, not a slot's labware: the next pipetting move arcs high.
-    self._current_labware_id = None
+    # The trash is not a slot's labware, so the next pipetting move arcs high.
+    async with self.flex._moving_to(None):
+      await self._execute(
+        "moveToAddressableAreaForDropTip",
+        {
+          "pipetteId": self.pipette_id,
+          "addressableAreaName": self._trash_addressable_area(trash),
+          "alternateDropLocation": True,
+          "minimumZHeight": self._traversal_height(),
+        },
+      )
+      await self._execute("dropTipInPlace", {"pipetteId": self.pipette_id})
 
   # --- Fine-pipetting shared helpers ---
 
@@ -512,18 +518,17 @@ class _FlexHead:
     deliberately does not prime for it, because reaching this state means the
     tip has held liquid and a probe wants a dry one.
     """
-    result = await self._execute_draw(
-      command_type,
-      {
-        "pipetteId": self.pipette_id,
-        "labwareId": labware_id,
-        "wellName": well_name,
-        "wellLocation": {
-          "origin": "top",
-          "offset": {"x": 0, "y": 0, "z": _LIQUID_PROBE_START_OFFSET_Z},
-        },
+    params: Dict[str, Any] = {
+      "pipetteId": self.pipette_id,
+      "labwareId": labware_id,
+      "wellName": well_name,
+      "wellLocation": {
+        "origin": "top",
+        "offset": {"x": 0, "y": 0, "z": _LIQUID_PROBE_START_OFFSET_Z},
       },
-    )
+    }
+    await self._travel_guard(params)
+    result = await self._execute_draw(command_type, params)
     return cast(Optional[float], result.get("result", {}).get("z_position"))
 
   async def _liquid_probe_z(self, labware_id: str, well_name: str, where: str) -> float:
@@ -742,10 +747,9 @@ class _FlexHead:
     }
     if speed is not None:
       params["speed"] = speed
-    await self._execute("moveToCoordinates", params)
-    # A raw jog leaves the pipette at an arbitrary point: the next pipetting move
-    # can no longer assume it is over its last labware, so make it arc high.
-    self._current_labware_id = None
+    # A raw jog ends at an arbitrary point, so the next pipetting move arcs high.
+    async with self.flex._moving_to(None):
+      await self._execute("moveToCoordinates", params)
 
   async def move_to_well(
     self,
@@ -784,7 +788,9 @@ class _FlexHead:
     }
     if speed is not None:
       params["speed"] = speed
-    await self._execute("moveToWell", params)
+    # The head ends over real labware, so pipetting there next crosses nothing.
+    async with self.flex._moving_to(labware_id):
+      await self._execute("moveToWell", params)
 
   async def move_relative(self, axis: str, distance: float) -> None:
     """Jog one axis by ``distance`` mm from wherever the head is now.
@@ -796,10 +802,12 @@ class _FlexHead:
     self._warn_untested_hardware("move_relative")
     if axis not in _MOVE_AXES:
       raise ValueError(f"axis must be one of {sorted(_MOVE_AXES)}, got {axis!r}")
-    await self._execute(
-      "moveRelative",
-      {"pipetteId": self.pipette_id, "axis": axis, "distance": distance},
-    )
+    # Same arbitrary end point as move_to: the next pipetting move arcs high.
+    async with self.flex._moving_to(None):
+      await self._execute(
+        "moveRelative",
+        {"pipetteId": self.pipette_id, "axis": axis, "distance": distance},
+      )
 
   async def move_to_addressable_area(
     self,
@@ -827,9 +835,9 @@ class _FlexHead:
     }
     if speed is not None:
       params["speed"] = speed
-    await self._execute("moveToAddressableArea", params)
     # A deck fixture is not a slot's labware: the next pipetting move arcs high.
-    self._current_labware_id = None
+    async with self.flex._moving_to(None):
+      await self._execute("moveToAddressableArea", params)
 
   # --- In-place pipetting (acts where the head already is) ---
 
@@ -1259,7 +1267,9 @@ class FlexHead1(_FlexHead):
     self._warn_untested_hardware("touch_tip")
     self._require_mounted_tip()
     labware_id, well_name = await self._well_target(well)
-    await self._execute("touchTip", self._touch_tip_params(labware_id, well_name, radius, offset))
+    await self._execute_at_well(
+      "touchTip", self._touch_tip_params(labware_id, well_name, radius, offset)
+    )
 
   async def liquid_probe(self, well: Well) -> float:
     """Probe downward in ``well`` until the pressure sensor detects liquid; return its z (mm).
@@ -2136,7 +2146,9 @@ class FlexHead8(_FlexHead):
     well_name, _ = self._column_anchor_and_items(plate, column)
     await self._ensure_all_mode()
     labware_id = await self.flex._ensure_labware_loaded(plate)
-    await self._execute("touchTip", self._touch_tip_params(labware_id, well_name, radius, offset))
+    await self._execute_at_well(
+      "touchTip", self._touch_tip_params(labware_id, well_name, radius, offset)
+    )
 
   async def liquid_probe(self, plate: Plate, column: int) -> float:
     """Probe for liquid in a column -- one ``liquidProbe`` command anchored at
@@ -2662,6 +2674,6 @@ class FlexHead96(_FlexHead):
     self._require_mounted_tip()
     self._check_full_coverage(plate)
     labware_id = await self.flex._ensure_labware_loaded(plate)
-    await self._execute(
+    await self._execute_at_well(
       "touchTip", self._touch_tip_params(labware_id, self._ANCHOR_WELL_NAME, radius, offset)
     )

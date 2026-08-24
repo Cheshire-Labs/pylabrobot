@@ -1,5 +1,17 @@
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, cast
+from contextlib import asynccontextmanager
+from typing import (
+  Any,
+  AsyncIterator,
+  Dict,
+  Iterable,
+  List,
+  Optional,
+  Set,
+  Tuple,
+  Type,
+  cast,
+)
 
 from pylabrobot.opentrons.flex_gripper import FlexGripper
 from pylabrobot.opentrons.flex_head import FlexHead1, FlexHead8, FlexHead96, _FlexHead
@@ -129,11 +141,29 @@ class OpentronsFlex(OpentronsRobot):
     # Names loaded under the non-pipettable movable stub. Tracked separately so
     # a pipetting op refuses them even on a load-cache hit.
     self._stub_labware: Set[str] = set()
+    # The labware id the robot last pipetted over, None when unknown. On the robot
+    # and not the head: one x/y gantry, so a move by either head moves both.
+    self._current_labware_id: Optional[str] = None
     self.left: Optional[_FlexHead] = None
     self.right: Optional[_FlexHead] = None
     self.head96: Optional[_FlexHead] = None
     self.gripper: Optional[FlexGripper] = None
     self._heads: List[_FlexHead] = []
+
+  @asynccontextmanager
+  async def _moving_to(self, labware_id: Optional[str]) -> AsyncIterator[None]:
+    """Run a gantry move, and take ``labware_id`` as the new pipetting position
+    only once the move has landed.
+
+    The tracked position is dropped first because a move that raises may have
+    left the gantry anywhere, including partway across the deck, and the arc
+    guard has to read that as unknown rather than as wherever it set off from.
+    Pass ``None`` for a move that ends somewhere no labware names: a raw jog, a
+    deck fixture, the trash, a home, or anything the gripper drove.
+    """
+    self._current_labware_id = None
+    yield
+    self._current_labware_id = labware_id
 
   def attach_deck(self, deck: FlexDeck) -> None:
     """Swap in a new deck, so a caller can describe the deck without rebuilding
@@ -146,6 +176,7 @@ class OpentronsFlex(OpentronsRobot):
     self._loaded_labware.clear()
     self._defined_labware.clear()
     self._stub_labware.clear()
+    self._current_labware_id = None
 
   async def _create_run(self) -> str:
     # labwareIds and uploaded definitions are both run-scoped server-side, so
@@ -154,6 +185,7 @@ class OpentronsFlex(OpentronsRobot):
     self._loaded_labware.clear()
     self._defined_labware.clear()
     self._stub_labware.clear()
+    self._current_labware_id = None
     return run_id
 
   async def _model_setup(self) -> None:
@@ -418,6 +450,11 @@ class OpentronsFlex(OpentronsRobot):
 
   # --- Robot-level commands: axis motion, status surfaces, run log ---
 
+  async def home(self) -> Dict[str, Any]:
+    """Home all axes; the gantry parks at the rear-left-top, over no labware."""
+    async with self._moving_to(None):
+      return await super().home()
+
   async def move_axes_to(
     self,
     axis_map: Dict[str, float],
@@ -437,7 +474,8 @@ class OpentronsFlex(OpentronsRobot):
     """
     _require_robot_commands("robot/moveAxesTo", self.api_version)
     params = _axis_motion_params(axis_map, speed, critical_point)
-    return _reported_axis_position(await self._execute_command("robot/moveAxesTo", params))
+    async with self._moving_to(None):
+      return _reported_axis_position(await self._execute_command("robot/moveAxesTo", params))
 
   async def move_axes_relative(
     self, axis_map: Dict[str, float], speed: Optional[float] = None
@@ -450,7 +488,8 @@ class OpentronsFlex(OpentronsRobot):
     """
     _require_robot_commands("robot/moveAxesRelative", self.api_version)
     params = _axis_motion_params(axis_map, speed)
-    return _reported_axis_position(await self._execute_command("robot/moveAxesRelative", params))
+    async with self._moving_to(None):
+      return _reported_axis_position(await self._execute_command("robot/moveAxesRelative", params))
 
   async def retract_axis(self, axis: str) -> None:
     """Retract ``axis`` to its home position, clearing the deck below it.
@@ -460,7 +499,8 @@ class OpentronsFlex(OpentronsRobot):
         any wire command is sent.
     """
     _validate_axes([axis])
-    await self._execute_command("retractAxis", {"axis": axis})
+    async with self._moving_to(None):
+      await self._execute_command("retractAxis", {"axis": axis})
 
   async def set_status_bar(self, animation: str) -> None:
     """Play a built-in light-bar animation: "idle", "confirm", "updating", "disco" or "off".
