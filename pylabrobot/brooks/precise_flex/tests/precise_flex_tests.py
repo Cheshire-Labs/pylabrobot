@@ -92,8 +92,13 @@ class TestGripperTargetsStayInsideTheirLimits(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(self._sent_commands()[-2:], ["GripClosePos 520.0", "gripper 2"])
 
   def test_the_default_open_stands_off_the_grip_rather_than_reaching_the_stop(self):
-    self.assertEqual(self.arm.default_open_position, 514.0)
-    self.assertLess(self.arm.default_open_position, self.arm._gripper_soft_max)
+    self.assertEqual(self.arm.open_position(), 514.0)
+    self.assertLess(self.arm.open_position(), self.arm._gripper_soft_max)
+
+  def test_a_caller_that_tracks_its_own_opening_gets_that_opening(self):
+    """An integration holding a per-labware opening has to be able to open by it, or the
+    jaws it picks with and the jaws an operator opens are two different numbers."""
+    self.assertEqual(self.arm.open_position(jaw_opening=18.0), 518.0)
 
 
 class TestPreciseFlex400Gripper(unittest.IsolatedAsyncioTestCase):
@@ -637,7 +642,8 @@ class TestPreciseFlex400AutoRecoverOnMove(unittest.IsolatedAsyncioTestCase):
     self._stub("0 0.0 90.0 0.0 0.0")  # gripper at 0.0, below its floor
     with self.assertRaises(OutOfRangeOfMotionError) as ctx:
       await self.arm.move_to_joint_position({Axis.SHOULDER: 0.0})
-    self.assertIn("home the arm", str(ctx.exception))
+    self.assertIn("Homing also re-seats the gripper", str(ctx.exception))
+    self.assertNotIn("Homing will not recover", str(ctx.exception))
 
   async def test_a_stranded_rotary_axis_is_told_homing_will_not_help(self):
     """The rotary axes are absolute: homing re-reads the same out-of-range value."""
@@ -645,7 +651,22 @@ class TestPreciseFlex400AutoRecoverOnMove(unittest.IsolatedAsyncioTestCase):
     self._stub("0 93.5 90.0 0.0 0")
     with self.assertRaises(OutOfRangeOfMotionError) as ctx:
       await self.arm.move_to_joint_position({Axis.SHOULDER: 0.0})
-    self.assertIn("Homing will not recover it", str(ctx.exception))
+    self.assertIn("Homing will not recover the other axes", str(ctx.exception))
+    self.assertNotIn("re-seats the gripper", str(ctx.exception))
+
+  async def test_a_gripper_and_a_rotary_axis_out_together_are_told_about_both(self):
+    """Answering for the gripper alone tells an operator homing fixes this, and it does
+    not: the rotary axis is still out and still refuses every move afterwards."""
+    self.arm._recover_out_of_range = False
+    self.arm._configuration = MagicMock(
+      soft_limits={Axis.SHOULDER: (-93.0, 93.0), Axis.GRIPPER: (69.0, 134.0)}
+    )
+    self._stub("0 93.5 90.0 0.0 0.0")  # shoulder past its limit AND gripper below its floor
+    with self.assertRaises(OutOfRangeOfMotionError) as ctx:
+      await self.arm.move_to_joint_position({Axis.SHOULDER: 0.0})
+    message = str(ctx.exception)
+    self.assertIn("Homing also re-seats the gripper", message)
+    self.assertIn("Homing will not recover the other axes", message)
 
   async def test_move_to_location_is_also_guarded(self):
     """The Cartesian path funnels through the same guard: an out-of-range axis raises and sends no
@@ -972,7 +993,9 @@ class TestPickAndPlaceAreComposedOfMoves(unittest.IsolatedAsyncioTestCase):
     self.assertIn("GripOpenPos 510.0", self._sent())  # closed_gripper_position 500 + 10
 
   async def test_the_jaws_never_open_past_the_axis_ceiling(self):
-    self.arm._gripper_soft_max = 505.0
+    # Both ends together: the arm adopts them from one discovered tuple, so a pose with
+    # only one of them set is a state it cannot be in.
+    self.arm._gripper_soft_min, self.arm._gripper_soft_max = 490.0, 505.0
     await self.arm.pick_up_at_location(
       _PAD_1, direction=2.03, resource_width=80.0, jaw_opening=40.0
     )

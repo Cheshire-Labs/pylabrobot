@@ -1289,5 +1289,6 @@ class TestFlexHead8SingleOpPipettingHeight(unittest.TestCase):
     for cmd in (dispense_cmd, aspirate_cmd):
       self.assertEqual(cmd["params"]["wellLocation"]["offset"]["z"], 1.0)
 
+
 if __name__ == "__main__":
   unittest.main()

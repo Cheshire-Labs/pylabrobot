@@ -2123,16 +2123,14 @@ class PreciseFlex:
     changes nothing. The gripper is the exception: it has no brake, so it drops out of
     range whenever the motors lose power, and homing does re-seat it.
     """
+    advice = ["Call recover_axes_within_limits() to drive them back into range."]
     if Axis.GRIPPER in axes:
-      return (
-        "Call recover_axes_within_limits() to drive it back into range, or home the arm: "
-        "the gripper has no brake, so it falls when the motors lose power, and homing "
-        "re-seats it."
+      advice.append(
+        "Homing also re-seats the gripper: it has no brake, so it falls when the motors lose power."
       )
-    return (
-      "Homing will not recover it (the rotary axes are absolute); call "
-      "recover_axes_within_limits() to drive it back into range."
-    )
+    if any(axis is not Axis.GRIPPER for axis in axes):
+      advice.append("Homing will not recover the other axes (the rotary axes are absolute).")
+    return " ".join(advice)
 
   @staticmethod
   def _fmt_axes(axes: Dict[Axis, tuple]) -> str:
@@ -2562,14 +2560,19 @@ class PreciseFlex:
   _gripper_soft_min: Optional[float] = None
   _gripper_soft_max: Optional[float] = None
 
-  @property
-  def default_open_position(self) -> float:
+  def open_position(self, jaw_opening: Optional[float] = None) -> float:
     """Where the jaws stand off the calibrated grip position, in gripper-axis units.
 
     What an open with no width in it should reach for. The stops are a long move to no
     purpose, and driving to one is what strands the axis outside its limits.
+
+    `jaw_opening` is how far off the grip position the caller wants the jaws. An
+    integration that tracks its own per-labware opening passes it here, so the arm
+    opens by the same number it picks with; `_JAW_OPENING` is only what this arm
+    answers when nobody says.
     """
-    return self.closed_gripper_position + _JAW_OPENING
+    opening = _JAW_OPENING if jaw_opening is None else jaw_opening
+    return self.closed_gripper_position + opening
 
   @evented_operation(
     "precise_flex.move_gripper",
@@ -2653,24 +2656,30 @@ class PreciseFlex:
       await self.send_command("gripper 1")
 
   def _within_gripper_limits(self, units: float) -> float:
-    """A gripper target held inside whichever soft limits are known, with headroom.
+    """A gripper target held a little inside the axis' soft limits.
 
-    Each end is applied on its own: an arm that has read one limit and not the other
-    still gets the end it knows about.
+    Both ends are adopted together off one discovered tuple, so the arm has either
+    read its limits or read neither, and before setup there is nothing to hold to.
     """
-    low = high = None
-    if self._gripper_soft_min is not None:
-      low = self._gripper_soft_min + _GRIPPER_LIMIT_HEADROOM
-    if self._gripper_soft_max is not None:
-      high = self._gripper_soft_max - _GRIPPER_LIMIT_HEADROOM
-    if low is not None and high is not None and low > high:
-      # A range narrower than the headroom itself: the middle is the safest target.
-      return (low + high) / 2
-    if low is not None:
-      units = max(units, low)
-    if high is not None:
-      units = min(units, high)
-    return units
+    if self._gripper_soft_min is None or self._gripper_soft_max is None:
+      return units
+    low = self._gripper_soft_min + _GRIPPER_LIMIT_HEADROOM
+    high = self._gripper_soft_max - _GRIPPER_LIMIT_HEADROOM
+    if low > high:
+      # A range narrower than the headroom at both ends: the middle is the safest target.
+      held = (low + high) / 2
+    else:
+      held = min(max(units, low), high)
+    if held != units:
+      logger.info(
+        "[PreciseFlex %s] gripper target %s held to %s, inside [%s, %s]",
+        self.io._host,
+        units,
+        held,
+        self._gripper_soft_min,
+        self._gripper_soft_max,
+      )
+    return held
 
   async def is_gripper_closed(self) -> bool:
     """(Single Gripper Only) Tests if the gripper is fully closed by checking the end-of-travel sensor.
