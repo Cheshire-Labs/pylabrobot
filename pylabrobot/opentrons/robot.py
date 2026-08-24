@@ -129,6 +129,13 @@ class OpentronsRobot(abc.ABC):
     port: int = 31950,
     transport: Optional[OpentronsTransport] = None,
   ) -> None:
+    """Build a robot handle. Nothing is contacted until ``setup()``.
+
+    Args:
+      host: the robot's address.
+      port: the robot-server's port.
+      transport: wire transport to use instead of a real one, for offline runs.
+    """
     self.host, self.port = host, port
     self.base_url = f"http://{host}:{port}"
     # Built here rather than on connect: a pylabrobot io refuses construction

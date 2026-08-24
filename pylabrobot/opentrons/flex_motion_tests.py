@@ -326,7 +326,7 @@ class TestRobotCommandsVersionGate(unittest.TestCase):
     finally:
       asyncio.run(flex.stop())
 
-  def test_unparseable_version_rejected(self):
+  def test_unparsable_version_rejected(self):
     # A version the gate cannot parse must raise, not silently pass.
     flex, transport = _flex_with_version("unknown")
     asyncio.run(flex.setup())
