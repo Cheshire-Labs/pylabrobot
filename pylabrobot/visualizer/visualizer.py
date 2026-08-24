@@ -10,7 +10,7 @@ import re
 import threading
 import time
 import webbrowser
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
   import websockets
@@ -25,11 +25,48 @@ except ImportError as e:
 from pylabrobot.__version__ import STANDARD_FORM_JSON_VERSION
 from pylabrobot.resources import Resource
 
-_WS_PORT_ATTEMPTS = 100
-"""How many consecutive ports the websocket server tries before giving up."""
+_PORT_ATTEMPTS = 100
+"""How many consecutive ports either server tries before giving up."""
 
-_WS_SERVER_START_SECONDS = 30.0
-"""How long `setup()` waits for that server before saying it did not start."""
+_SERVER_START_SECONDS = 30.0
+"""How long `setup()` waits for a server before saying it did not start."""
+
+
+async def _await_server_start(
+  lock: threading.Lock, thread: threading.Thread, what: str, port: Callable[[], int]
+) -> None:
+  """Wait for the thread that starts `what` to release the lock it was handed.
+
+  Both servers start on their own thread and hand back a held lock, so waiting
+  on it is the only way to learn the port they settled on. Waiting forever is
+  not: a thread that died, or one that ran out of ports, leaves nothing to
+  release the lock and shows up as a process that stops with nothing to read.
+
+  The clock only judges a search that has stopped moving. Ports a test run just
+  released sit in TIME_WAIT for a while, so a machine under load can legitimately
+  spend a long time walking past them, and failing that off a flat deadline would
+  turn slowness into an error. Moving on to the next port restarts the clock; the
+  attempt count is what ends a search that will never succeed.
+  """
+  deadline = time.monotonic() + _SERVER_START_SECONDS
+  last_port = port()
+  while not lock.acquire(blocking=False):
+    if not thread.is_alive():
+      raise RuntimeError(
+        f"The visualizer's {what} stopped before it started serving. "
+        f"The last port it tried was {port()}."
+      )
+    if port() != last_port:
+      last_port = port()
+      deadline = time.monotonic() + _SERVER_START_SECONDS
+    elif time.monotonic() > deadline:
+      raise RuntimeError(
+        f"The visualizer's {what} did not start within {_SERVER_START_SECONDS:.0f}s "
+        f"on port {last_port}."
+      )
+    await asyncio.sleep(0.01)
+  lock.release()
+
 
 logger = logging.getLogger(__name__)
 
@@ -132,10 +169,10 @@ class Visualizer:
 
     Args:
       host: The hostname of the file and websocket server.
-      ws_port: The port of the websocket server. If this port is in use, the port will be
-        incremented until a free port is found.
-      fs_port: The port of the file server. If this port is in use, the port will be incremented
-        until a free port is found.
+      ws_port: The port of the websocket server. If this port is in use, the next ports are
+        tried, up to 100 of them.
+      fs_port: The port of the file server. If this port is in use, the next ports are tried,
+        up to 100 of them.
       open_browser: If `True`, the visualizer will open a browser window when it is started.
       name: A custom name to display in the browser header. If ``None``, the filename of the
         calling script or notebook is detected automatically.
@@ -491,7 +528,7 @@ class Visualizer:
       raise RuntimeError("The visualizer has already been started.")
 
     await self._run_ws_server()
-    self._run_file_server()
+    await self._run_file_server()
     self.setup_finished = True
 
   async def _run_ws_server(self):
@@ -513,11 +550,11 @@ class Visualizer:
         except asyncio.CancelledError:
           pass
         except OSError:
-          # If the port is in use, try the next port -- but not forever. The
-          # caller is spinning on a lock only a started server releases, so an
-          # endless search shows up as a hang with nothing to read.
+          # If the port is in use, try the next port -- but not forever. Only a
+          # started server releases the lock the caller is waiting on, so an
+          # endless search shows up as a process that stops with nothing to read.
           taken += 1
-          if taken >= _WS_PORT_ATTEMPTS:
+          if taken >= _PORT_ATTEMPTS:
             break
           self.ws_port += 1
 
@@ -531,16 +568,9 @@ class Visualizer:
     self._t = threading.Thread(target=start_loop, daemon=True)
     self.t.start()
 
-    deadline = time.monotonic() + _WS_SERVER_START_SECONDS
-    while lock.locked():
-      if time.monotonic() > deadline:
-        raise RuntimeError(
-          f"The visualizer's websocket server did not start within "
-          f"{_WS_SERVER_START_SECONDS:.0f}s. The last port it tried was {self.ws_port}."
-        )
-      time.sleep(0.001)
+    await _await_server_start(lock, self.t, "websocket server", lambda: self.ws_port)
 
-  def _run_file_server(self):
+  async def _run_file_server(self):
     """Start a simple webserver to serve static files."""
 
     dirname = os.path.dirname(__file__)
@@ -597,21 +627,23 @@ class Visualizer:
           else:
             return super().do_GET()
 
-      while True:
+      for _ in range(_PORT_ATTEMPTS):
         try:
           self._httpd = http.server.HTTPServer(
             (self.host, self.fs_port),
             QuietSimpleHTTPRequestHandler,
           )
-          print(
-            f"File server started at http://{self.host}:{self.fs_port} . "
-            "Open this URL in your browser."
-          )
-          lock.release()
           break
         except OSError:
           self.fs_port += 1
+      else:
+        return
 
+      print(
+        f"File server started at http://{self.host}:{self.fs_port} . "
+        "Open this URL in your browser."
+      )
+      lock.release()
       self.httpd.serve_forever()
 
     lock = threading.Lock()
@@ -624,9 +656,8 @@ class Visualizer:
     )
     self.fst.start()
 
-    # Wait for the server to start before opening the browser so that we can get the correct port.
-    while lock.locked():
-      time.sleep(0.001)
+    # The port is only known once the server binds one, and the browser needs it.
+    await _await_server_start(lock, self.fst, "file server", lambda: self.fs_port)
 
     if self.open_browser:
       webbrowser.open(f"http://{self.host}:{self.fs_port}")
