@@ -6,6 +6,7 @@ from typing import (
   Dict,
   Iterable,
   List,
+  NamedTuple,
   Optional,
   Set,
   Tuple,
@@ -47,6 +48,17 @@ _CHANNELS_TO_HEAD: Dict[int, Type[_FlexHead]] = {
   8: FlexHead8,
   96: FlexHead96,
 }
+
+
+class _LoadedGeometry(NamedTuple):
+  """The parts of a run's labware definition a deck z has to be framed against."""
+
+  wells: Dict[str, Dict[str, Any]]
+  corner_offset_z: float
+  offset_id: Optional[str]
+  """The labware offset the run applied, if any. PyLabRobot creates runs with no
+  offsets, so this is None in practice; it is read so a run that does carry one
+  fails loudly rather than reporting heights measured against the wrong floor."""
 
 
 def _has_pipettable_geometry(resource: Resource) -> bool:
@@ -136,6 +148,10 @@ class OpentronsFlex(OpentronsRobot):
     )
     self.deck = deck
     self._loaded_labware: Dict[str, str] = {}
+    # resource.name -> the geometry the run loaded it with. The run owns this: a
+    # labware loaded by an official Opentrons name uses vendor geometry PyLabRobot
+    # never sees, so nothing on this side can frame a deck z against it.
+    self._loaded_geometry: Dict[str, _LoadedGeometry] = {}
     # resource.name -> (namespace, load_name, version) of an uploaded custom definition.
     self._defined_labware: Dict[str, Tuple[str, str, int]] = {}
     # Names loaded under the non-pipettable movable stub. Tracked separately so
@@ -186,6 +202,7 @@ class OpentronsFlex(OpentronsRobot):
     self._defined_labware.clear()
     self._stub_labware.clear()
     self._current_labware_id = None
+    self._loaded_geometry.clear()
 
   async def _create_run(self) -> str:
     # labwareIds and uploaded definitions are both run-scoped server-side, so
@@ -195,6 +212,7 @@ class OpentronsFlex(OpentronsRobot):
     self._defined_labware.clear()
     self._stub_labware.clear()
     self._current_labware_id = None
+    self._loaded_geometry.clear()
     return run_id
 
   async def _model_setup(self) -> None:
@@ -367,6 +385,13 @@ class OpentronsFlex(OpentronsRobot):
       )
 
     self._loaded_labware[name] = labware_id
+    definition = result.get("result", {}).get("definition")
+    if isinstance(definition, dict):
+      self._loaded_geometry[name] = _LoadedGeometry(
+        wells=cast(Dict[str, Dict[str, Any]], definition.get("wells", {})),
+        corner_offset_z=float(definition.get("cornerOffsetFromSlot", {}).get("z", 0.0)),
+        offset_id=cast(Optional[str], result.get("result", {}).get("offsetId")),
+      )
     logger.info(
       "Loaded labware '%s' at slot %s -> ID: %s (OT: %s)",
       name,
@@ -375,6 +400,37 @@ class OpentronsFlex(OpentronsRobot):
       load_name,
     )
     return labware_id
+
+  def well_bottom_deck_z(self, resource: Resource, well_name: str) -> float:
+    """Deck z of the floor one well's ``liquid_height`` is measured from.
+
+    The definition the RUN loaded owns this number. A labware loaded by an
+    official Opentrons name is placed by vendor geometry PyLabRobot never sees,
+    so deriving the floor from the PLR resource would answer in a frame the
+    robot does not share -- and a probe reports a deck z, which is only useful
+    once it is put back into the frame a caller pipettes in.
+    """
+    loaded = self._loaded_geometry.get(resource.name)
+    if loaded is None:
+      raise OpentronsError(
+        "Labware geometry unknown",
+        f"the run reported no definition for '{resource.name}', so the floor its liquid "
+        "heights are measured from is unknown.",
+      )
+    if loaded.offset_id is not None:
+      raise OpentronsError(
+        "Labware offset unaccounted for",
+        f"the run applied labware offset {loaded.offset_id!r} to '{resource.name}', which "
+        "moves it off where its definition puts it, so a height measured against that "
+        "definition would be wrong by the offset.",
+      )
+    entry = loaded.wells.get(well_name)
+    if entry is None:
+      raise OpentronsError(
+        "Unknown well",
+        f"the definition loaded for '{resource.name}' has no well {well_name!r}.",
+      )
+    return resource.get_absolute_location(z="b").z + loaded.corner_offset_z + float(entry["z"])
 
   async def sync_tips_to_robot(self, tip_rack: TipRack) -> None:
     """Make the robot's tip-rack model agree with PyLabRobot's.
@@ -441,6 +497,7 @@ class OpentronsFlex(OpentronsRobot):
       )
       del self._loaded_labware[name]
     self._defined_labware.pop(name, None)
+    self._loaded_geometry.pop(name, None)
     self._stub_labware.discard(name)
     slot = self.deck.get_slot(resource)
     if slot is not None:
