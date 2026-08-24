@@ -566,10 +566,10 @@ class OpentronsFlex(OpentronsRobot):
 
   # --- Robot-level commands: axis motion, status surfaces, run log ---
 
-  async def home(self) -> Dict[str, Any]:
+  async def home(self, timeout: Optional[float] = None) -> Dict[str, Any]:
     """Home all axes; the gantry parks at the rear-left-top, over no labware."""
     async with self._moving_to(None):
-      return await super().home()
+      return await super().home(timeout=timeout)
 
   async def move_axes_to(
     self,
