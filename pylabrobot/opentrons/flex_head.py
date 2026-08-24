@@ -2173,6 +2173,7 @@ class FlexHead8(_FlexHead):
     """
     self._warn_untested_hardware("liquid_probe_container")
     self._require_mounted_tip()
+    self._require_span_fits_container(container, 0.0, _EIGHT_CHANNEL_Y_SPAN, None)
     await self._ensure_all_mode()
     labware_id = await self.flex._ensure_labware_loaded(container)
     return await self._liquid_probe_z(labware_id, _CONTAINER_WELL_NAME, f"{container.name!r}")
@@ -2181,6 +2182,7 @@ class FlexHead8(_FlexHead):
     """Like ``liquid_probe_container`` but returns ``None`` when no liquid is found."""
     self._warn_untested_hardware("try_liquid_probe_container")
     self._require_mounted_tip()
+    self._require_span_fits_container(container, 0.0, _EIGHT_CHANNEL_Y_SPAN, None)
     await self._ensure_all_mode()
     labware_id = await self.flex._ensure_labware_loaded(container)
     return await self._probe_z("tryLiquidProbe", labware_id, _CONTAINER_WELL_NAME)

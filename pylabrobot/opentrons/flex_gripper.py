@@ -112,7 +112,7 @@ class FlexGripper:
     labware_id = await self.flex._ensure_labware_loaded(
       resource, allow_stub=True, grip_distance_from_top=grip_distance_from_top
     )
-    await self.flex._execute_command(
+    result = await self.flex._execute_command(
       "moveLabware",
       {
         "labwareId": labware_id,
@@ -120,6 +120,7 @@ class FlexGripper:
         "strategy": "usingGripper",
       },
     )
+    self.flex.note_labware_offset(name, result)
 
     deck.unassign_child_at_slot(from_slot)
     deck.assign_child_at_slot(resource, to_slot)

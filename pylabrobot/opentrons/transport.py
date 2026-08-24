@@ -423,6 +423,14 @@ class ChatterboxTransport:
 
     A definition uploaded in this session wins over one the robot ships with,
     the same way the server serves back whatever it stored for the name.
+
+    A real robot always answers with one, because it holds the vendor definition
+    for every official load name. This transport holds none of those, so a caller
+    simulating official-name labware has to pass the definitions it cares about as
+    ``robot_labware_definitions``. Without them the load reports no definition and
+    anything measured against it refuses -- which is the honest answer, since
+    inventing geometry here is exactly the wrong-by-millimetres number the driver
+    reads the run's definition to avoid.
     """
     for definition in reversed(self.labware_definitions):
       if definition.get("parameters", {}).get("loadName") == load_name:
