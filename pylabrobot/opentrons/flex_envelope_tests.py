@@ -175,6 +175,26 @@ class TestBetweenSlotArcGuard(unittest.TestCase):
     finally:
       asyncio.run(flex.stop())
 
+  def test_a_move_to_a_deck_fixture_makes_the_next_pipetting_move_arc_high(self):
+    """A trash or waste chute is not a slot's labware, so coming back to the plate
+    crosses slots again even though it is the same plate it left."""
+    flex, transport, head, rack, plate = self._setup()
+    try:
+      asyncio.run(head.pick_up_tips(rack, column=0))
+      asyncio.run(head.aspirate(plate.column(0), volume=50))
+      asyncio.run(head.move_to_addressable_area("movableTrashA3"))
+      n = len(self._move_to_wells(transport))
+
+      asyncio.run(head.dispense(plate.column(1), volume=50))
+
+      self.assertEqual(
+        len(self._move_to_wells(transport)),
+        n + 1,
+        "returning from a deck fixture must arc high, not descend from wherever it left",
+      )
+    finally:
+      asyncio.run(flex.stop())
+
 
 if __name__ == "__main__":
   unittest.main()

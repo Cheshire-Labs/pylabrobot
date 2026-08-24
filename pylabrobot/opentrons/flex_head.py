@@ -828,6 +828,8 @@ class _FlexHead:
     if speed is not None:
       params["speed"] = speed
     await self._execute("moveToAddressableArea", params)
+    # A deck fixture is not a slot's labware: the next pipetting move arcs high.
+    self._current_labware_id = None
 
   # --- In-place pipetting (acts where the head already is) ---
 
