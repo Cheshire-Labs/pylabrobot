@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 # Seconds of polling a command gets on top of however long its own motion takes.
 COMMAND_POLL_HEADROOM = 30.0
 
+# Delay between two reads of a running command's status.
+COMMAND_STATUS_POLL_INTERVAL = 0.2
+
 
 def _plunger_seconds(params: Dict[str, Any]) -> float:
   """How long a command's own plunger travel takes, from its volume and rate.
@@ -24,6 +27,13 @@ def _plunger_seconds(params: Dict[str, Any]) -> float:
   if not isinstance(volume, (int, float)) or not isinstance(flow_rate, (int, float)):
     return 0.0
   return abs(volume) / flow_rate if flow_rate > 0 else 0.0
+
+
+def _command_budget(timeout: float, params: Dict[str, Any]) -> float:
+  """How long one command may be polled: its own budget, raised only by the plunger
+  travel it names. Not a floor, or no caller could ever set a short budget."""
+  motion = _plunger_seconds(params)
+  return max(timeout, motion + COMMAND_POLL_HEADROOM) if motion > 0 else timeout
 
 
 class OpentronsError(Exception):
@@ -299,7 +309,7 @@ class OpentronsRobot(abc.ABC):
       RuntimeError: If the command times out.
     """
     assert self.run_id is not None, "No active run. Call create_run() first."
-    timeout = max(timeout, _plunger_seconds(params) + COMMAND_POLL_HEADROOM)
+    timeout = _command_budget(timeout, params)
     payload = {
       "data": {
         "commandType": command_type,
@@ -317,19 +327,21 @@ class OpentronsRobot(abc.ABC):
     if not cmd_id:
       return cmd_data
 
-    # Poll for completion
+    # Status is read once more after the deadline passes: a command that finished
+    # during the last sleep succeeded, and calling that a timeout aborts a real move.
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    while True:
       resp = await self._get(f"/runs/{self.run_id}/commands/{cmd_id}")
       cmd_data = resp.get("data", {})
       status = cmd_data.get("status", "")
       if status == "succeeded":
         return cmd_data
-      elif status == "failed":
+      if status == "failed":
         raise OpentronsCommandError(command_type, cmd_data.get("error", {}))
-      await asyncio.sleep(0.2)
-
-    raise RuntimeError(f"Opentrons command '{command_type}' timed out after {timeout}s")
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        raise RuntimeError(f"Opentrons command '{command_type}' timed out after {timeout}s")
+      await asyncio.sleep(min(COMMAND_STATUS_POLL_INTERVAL, remaining))
 
   # --- Instrument Discovery ---
 
