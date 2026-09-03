@@ -89,6 +89,14 @@ async def _call_off_loop(call: Callable[..., Any], *args: Any, **kwargs: Any) ->
   ``asyncio.run()`` joins on the way out, so one request nobody ever answers would
   hang the process at shutdown and burn a pool slot every other backend shares. A
   daemon thread holds neither.
+
+  A thread per call, not a queue of one, and that is deliberate. ``ot_api`` gives
+  ``urlopen`` no socket timeout, so a request the robot never answers leaks its
+  thread for the life of the process. Queueing behind it would mean the stop that
+  contains a timed-out move could never reach the robot either, which is the worse
+  failure: the robot would keep executing what we stopped waiting for. The cost is
+  that after a timeout a second call can be in flight against the same robot while
+  the first is still stuck.
   """
   loop = asyncio.get_running_loop()
   future: "asyncio.Future[Any]" = loop.create_future()

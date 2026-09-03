@@ -423,7 +423,7 @@ class OpentronsFlex(OpentronsRobot):
     )
     return labware_id
 
-  def note_labware_offset(self, name: str, result: Dict[str, Any]) -> None:
+  def _note_labware_offset(self, name: str, result: Dict[str, Any]) -> None:
     """Carry the offset a command reported onto the cached geometry.
 
     A reload or a gripper move re-places the labware and hands back the offset
@@ -478,6 +478,11 @@ class OpentronsFlex(OpentronsRobot):
       raise OpentronsError(
         "Unknown well",
         f"the definition loaded for '{resource.name}' has no well {well_name!r}.",
+      )
+    if "z" not in entry:
+      raise OpentronsError(
+        "Incomplete well definition",
+        f"the definition loaded for '{resource.name}' gives well {well_name!r} no z.",
       )
     return resource.get_absolute_location(z="b").z + loaded.corner_offset_z + float(entry["z"])
 
@@ -562,7 +567,7 @@ class OpentronsFlex(OpentronsRobot):
     """
     labware_id = await self._ensure_labware_loaded(resource)
     result = await self._execute_command("reloadLabware", {"labwareId": labware_id})
-    self.note_labware_offset(resource.name, result)
+    self._note_labware_offset(resource.name, result)
 
   # --- Robot-level commands: axis motion, status surfaces, run log ---
 

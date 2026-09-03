@@ -1676,7 +1676,7 @@ class TestWellBottomDeckZ(unittest.TestCase):
   def _trough_on_deck(self, flex, official=True):
     trough = _make_trough(name="trough")
     if not official:
-      del trough.ot_load_name
+      del trough.ot_load_name  # type: ignore[attr-defined]
     flex.deck.assign_child_at_slot(trough, "C2")
     return trough
 

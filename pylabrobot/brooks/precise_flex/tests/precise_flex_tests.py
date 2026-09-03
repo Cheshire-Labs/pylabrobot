@@ -889,7 +889,10 @@ class TestMotionSettlesBeforeTheNextCommand(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAMoveCanRunAtItsOwnSpeed(unittest.IsolatedAsyncioTestCase):
-  """A slow move must not leave the arm slow for everything that follows."""
+  """A slow move must not leave the arm slow for everything that follows.
+
+  ``at_speed`` is the primitive; a caller scopes whatever it likes inside it.
+  """
 
   LOCATION = Coordinate(329.9, 80.29, 40.48)
 
@@ -913,25 +916,28 @@ class TestAMoveCanRunAtItsOwnSpeed(unittest.IsolatedAsyncioTestCase):
       patcher.start()
       self.addCleanup(patcher.stop)
 
-  async def test_no_speed_asked_for_leaves_the_profile_untouched(self):
+  async def test_a_move_outside_any_scope_leaves_the_profile_untouched(self):
     await self.arm.pick_up_at_location(self.LOCATION, direction=2.03, resource_width=80.0)
     self.assertEqual(self.speeds, [], "a move with no speed of its own must not write one")
 
+  async def test_no_speed_asked_for_writes_nothing_and_restores_nothing(self):
+    async with self.arm.at_speed(None):
+      await self.arm.pick_up_at_location(self.LOCATION, direction=2.03, resource_width=80.0)
+    self.assertEqual(self.speeds, [])
+
   async def test_a_pick_at_its_own_speed_puts_the_prior_speed_back(self):
-    await self.arm.pick_up_at_location(
-      self.LOCATION, direction=2.03, resource_width=80.0, speed_pct=20.0
-    )
+    async with self.arm.at_speed(20.0):
+      await self.arm.pick_up_at_location(self.LOCATION, direction=2.03, resource_width=80.0)
     self.assertEqual(self.speeds, [20.0, 100.0])
 
   async def test_a_place_at_its_own_speed_puts_the_prior_speed_back(self):
-    await self.arm.drop_at_location(
-      self.LOCATION, direction=2.03, resource_width=80.0, speed_pct=15.0
-    )
+    async with self.arm.at_speed(15.0):
+      await self.arm.drop_at_location(self.LOCATION, direction=2.03, resource_width=80.0)
     self.assertEqual(self.speeds, [15.0, 100.0])
 
   async def test_the_rail_traverse_runs_at_the_move_s_speed_too(self):
     # On a place the arm is carrying the plate down the rail, which is the whole reason a
-    # move asks to go slowly. Traversing first would leave that leg running fast.
+    # move asks to go slowly. The scope has to cover the traverse, not just the place.
     self.arm._has_rail = True
     order: list[str] = []
     mocked(self.arm._set_speed).side_effect = lambda pct: order.append(f"speed={pct}")
@@ -939,9 +945,10 @@ class TestAMoveCanRunAtItsOwnSpeed(unittest.IsolatedAsyncioTestCase):
     with patch.object(
       self.arm, "move_rail", AsyncMock(side_effect=lambda mm: order.append("rail"))
     ):
-      await self.arm.drop_at_location(
-        self.LOCATION, direction=2.03, resource_width=80.0, rail_position=120.0, speed_pct=15.0
-      )
+      async with self.arm.at_speed(15.0):
+        await self.arm.drop_at_location(
+          self.LOCATION, direction=2.03, resource_width=80.0, rail_position=120.0
+        )
 
     self.assertEqual(order, ["speed=15.0", "rail", "speed=100.0"])
 
@@ -952,9 +959,10 @@ class TestAMoveCanRunAtItsOwnSpeed(unittest.IsolatedAsyncioTestCase):
 
     with patch.object(self.arm, "move_rail", AsyncMock()) as rail:
       with self.assertRaises(ValueError):
-        await self.arm.drop_at_location(
-          self.LOCATION, direction=2.03, resource_width=80.0, rail_position=120.0, speed_pct=400.0
-        )
+        async with self.arm.at_speed(400.0):
+          await self.arm.drop_at_location(
+            self.LOCATION, direction=2.03, resource_width=80.0, rail_position=120.0
+          )
 
     rail.assert_not_called()
 
@@ -962,8 +970,9 @@ class TestAMoveCanRunAtItsOwnSpeed(unittest.IsolatedAsyncioTestCase):
     mocked(self.arm._pick_plate_c).side_effect = PreciseFlexError(0, "no plate present")
 
     with self.assertRaises(PreciseFlexError):
-      await self.arm.pick_up_at_location(
-        self.LOCATION, direction=2.03, resource_width=80.0, speed_pct=20.0
-      )
+      async with self.arm.at_speed(20.0):
+        await self.arm.pick_up_at_location(
+          self.LOCATION, direction=2.03, resource_width=80.0
+        )
 
     self.assertEqual(self.speeds, [20.0, 100.0])

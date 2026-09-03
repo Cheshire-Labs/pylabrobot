@@ -204,9 +204,11 @@ class PreciseFlex:
         Every recovery is logged.
       closed_gripper_position: firmware-unit value (passed to ``GripClosePos`` /
         ``GripOpenPos``) at which the jaws are at :attr:`min_gripper_width`.
-        Depends on the mounted gripper. The conversion mm → firmware units is
-        linear with slope 1: ``units = closed_gripper_position + (width_mm -
-        min_gripper_width)``.
+        Depends on the mounted gripper. That pairing is the anchor for the
+        mm → firmware unit conversion, which is linear with slope 1, and it is
+        frozen at construction: setup discovers the axis limits and rewrites
+        :attr:`min_gripper_width`, so reading it later would move what a width
+        means.
       parking_position: initial value for the public, runtime-settable ``parking_position`` that
         ``park()`` moves to. Leave None (the default) and setup fills the generic default RIGHT pose
         (planar fold, Z column at 3/4 of the discovered travel); reassign it any time to park
@@ -787,7 +789,7 @@ class PreciseFlex:
       )
     await self.send_command(f"moveJ {profile_index} {angles_str}")
 
-  async def _move_one_axis(self, axis: Axis, position: float) -> None:
+  async def _recover_axis(self, axis: Axis, position: float) -> None:
     """Move a single axis to an absolute position (firmware ``MoveOneAxis``).
 
     Used for recovery: the controller blocks a normal move while an axis is out of
@@ -1414,9 +1416,12 @@ class PreciseFlex:
   async def set_grasp_data(
     self, plate_width: float, finger_speed_pct: float, grasp_force: float
   ) -> None:
-    """Set the data to be used for the next force-controlled PickPlate command grip operation.
+    """Set the data the next force-controlled PickPlate grip will use.
 
-    This data remains in effect until the next GraspData command or the system is restarted.
+    Stateful, and not sticky: ``pick_up_at_location`` and ``pick_up_at_station``
+    write it themselves on every call, so data set here is lost if one of those
+    runs before the pick that wanted it. Otherwise it stands until the next
+    GraspData command or a controller restart.
 
     Args:
       plate_width: The plate width in mm.
@@ -1952,7 +1957,7 @@ class PreciseFlex:
           hi,
           target,
         )
-        await self._move_one_axis(axis, target)
+        await self._recover_axis(axis, target)
         await self._wait_for_eom()
         recovered[axis] = target
     finally:
@@ -2074,7 +2079,7 @@ class PreciseFlex:
 
     When an axis is out of range the controller blocks the move (-1012). With ``recover_out_of_range``
     set, this drives the offending axes back into range once (``recover_axes_within_limits``) and
-    retries; otherwise the ``OutOfRangeOfMotionError`` propagates. Recovery uses ``_move_one_axis``, a
+    retries; otherwise the ``OutOfRangeOfMotionError`` propagates. Recovery uses ``_recover_axis``, a
     different primitive, so it cannot recurse here.
     """
 
@@ -2141,8 +2146,8 @@ class PreciseFlex:
     Args:
       position: Target joint pose. Omitted axes keep their live values.
       speed_pct: Movement speed override as a percentage (0-100). If None, uses the current
-        speed setting. This STICKS: it is not restored afterwards, unlike the scoped
-        ``speed_pct`` on ``pick_up_at_location`` / ``drop_at_location``.
+        speed setting. This STICKS: it is not restored afterwards. Wrap a call in
+        ``at_speed`` instead to scope a speed to one move.
     """
     if speed_pct is not None:
       await self._set_speed(speed_pct)
@@ -2156,9 +2161,8 @@ class PreciseFlex:
   ) -> None:
     """Move one axis to an absolute position, leaving every other axis where it is.
 
-    Guarded like any other commanded move. Not to be confused with ``_move_one_axis``,
-    which skips the guard on purpose so it can recover an axis the controller has
-    already blocked.
+    Guarded like any other commanded move, unlike ``_recover_axis``, which skips
+    the guard on purpose so it can free an axis the controller has already blocked.
 
     Args:
       axis: The axis to move.
@@ -2526,6 +2530,13 @@ class PreciseFlex:
 
     This is the counterpart to :meth:`move_gripper` for integrations with
     taught joint-space routes. The caller owns the joint calibration.
+
+    A target outside the axis is held to the nearest end rather than refused,
+    which is the opposite of :meth:`move_gripper`. A width in mm that lands
+    out of range means ``closed_gripper_position`` is wrong, which is worth
+    raising on; a taught joint position that does is a route reaching a little
+    past the stop, and holding it there is what the route wanted. Either way
+    the arm never receives a target past the end, which is what strands it.
     """
     position = self._within_gripper_limits(position)
     await self._wait_for_eom()
@@ -2546,13 +2557,9 @@ class PreciseFlex:
       return units
     low = self._gripper_soft_min + _GRIPPER_LIMIT_HEADROOM
     high = self._gripper_soft_max - _GRIPPER_LIMIT_HEADROOM
-    if low > high:
-      # A range narrower than the headroom at both ends: the middle is the safest target.
-      held = (low + high) / 2
-    else:
-      held = min(max(units, low), high)
+    held = min(max(units, low), high)
     if held != units:
-      logger.info(
+      logger.warning(
         "[PreciseFlex %s] gripper target %s held to %s, inside [%s, %s]",
         self.io._host,
         units,
@@ -2683,7 +2690,7 @@ class PreciseFlex:
 
   @evented_operation(
     "precise_flex.pick_up_at_location",
-    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, orientation=None, wrist=None, rail_position=None, speed_pct=None: {
+    lambda self, location, direction, resource_width, finger_speed_pct=50.0, grasp_force=10.0, orientation=None, wrist=None, rail_position=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
@@ -2695,7 +2702,6 @@ class PreciseFlex:
       "resource_width": float(resource_width),
       "finger_speed_pct": float(finger_speed_pct),
       "grasp_force": float(grasp_force),
-      "speed_pct": speed_pct,
     },
   )
   async def pick_up_at_location(
@@ -2708,7 +2714,6 @@ class PreciseFlex:
     orientation: Optional[ElbowOrientation] = None,
     wrist: Optional[Wrist] = None,
     rail_position: Optional[float] = None,
-    speed_pct: Optional[float] = None,
   ) -> None:
     """Pick up at the specified Cartesian location.
 
@@ -2722,9 +2727,6 @@ class PreciseFlex:
         picks the closest configuration.
       wrist: Wrist configuration. If None, the robot picks the closest configuration.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
-      speed_pct: Run this one pick at this percentage of full speed, restoring the
-        prior speed afterwards. None leaves the arm's current speed alone. Unlike
-        ``move_to_location``, this does NOT stick: the speed is scoped to this call.
     """
     logger.info(
       "[PreciseFlex %s] pick_up: x=%s, y=%s, z=%s, direction=%s, resource_width_mm=%s",
@@ -2745,19 +2747,18 @@ class PreciseFlex:
       orientation=orientation,
       wrist=wrist,
     )
-    async with self.at_speed(speed_pct):
-      if rail_position is not None:
-        await self.move_rail(rail_position)
-      await self.set_grasp_data(
-        plate_width=resource_width,
-        finger_speed_pct=finger_speed_pct,
-        grasp_force=grasp_force,
-      )
-      await self._pick_plate_c(cartesian_position=coords)
+    if rail_position is not None:
+      await self.move_rail(rail_position)
+    await self.set_grasp_data(
+      plate_width=resource_width,
+      finger_speed_pct=finger_speed_pct,
+      grasp_force=grasp_force,
+    )
+    await self._pick_plate_c(cartesian_position=coords)
 
   @evented_operation(
     "precise_flex.drop_at_location",
-    lambda self, location, direction, resource_width, orientation=None, wrist=None, rail_position=None, speed_pct=None: {
+    lambda self, location, direction, resource_width, orientation=None, wrist=None, rail_position=None: {
       "device": _controller_reference(self),
       "target": _cartesian_target_reference(
         location,
@@ -2767,7 +2768,6 @@ class PreciseFlex:
         rail_position=rail_position,
       ),
       "resource_width": float(resource_width),
-      "speed_pct": speed_pct,
     },
   )
   async def drop_at_location(
@@ -2778,7 +2778,6 @@ class PreciseFlex:
     orientation: Optional[ElbowOrientation] = None,
     wrist: Optional[Wrist] = None,
     rail_position: Optional[float] = None,
-    speed_pct: Optional[float] = None,
   ) -> None:
     """Drop at the specified Cartesian location.
 
@@ -2790,9 +2789,6 @@ class PreciseFlex:
         picks the closest configuration.
       wrist: Wrist configuration. If None, the robot picks the closest configuration.
       rail_position: Linear rail position in mm. Required when the arm has a rail.
-      speed_pct: Run this one place at this percentage of full speed, restoring the
-        prior speed afterwards. None leaves the arm's current speed alone. Unlike
-        ``move_to_location``, this does NOT stick: the speed is scoped to this call.
     """
     logger.info(
       "[PreciseFlex %s] drop: x=%s, y=%s, z=%s, direction=%s, resource_width_mm=%s",
@@ -2813,10 +2809,9 @@ class PreciseFlex:
       orientation=orientation,
       wrist=wrist,
     )
-    async with self.at_speed(speed_pct):
-      if rail_position is not None:
-        await self.move_rail(rail_position)
-      await self._place_plate_c(cartesian_position=coords)
+    if rail_position is not None:
+      await self.move_rail(rail_position)
+    await self._place_plate_c(cartesian_position=coords)
 
   async def _pick_plate_j(self, joint_position: JointPose) -> None:
     """Pick a plate from the specified position using joint coordinates."""
